@@ -20,7 +20,7 @@ and refuses anything else.
      GitHub's editor and put the github.com/user-attachments URL it gives on its own line. -->
 
 <p align="center">
-  <a href="https://www.youtube.com/watch?v=VIDEO_ID">
+  <a href="https://youtu.be/aYn1RfyKkZc">
     <img src="docs/images/video-card.jpg" alt="Watch the full match on YouTube: Chris Jericho vs CM Punk" width="80%">
   </a>
   <br>
