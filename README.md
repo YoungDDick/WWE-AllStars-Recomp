@@ -292,7 +292,7 @@ The design decisions are in [`docs/adr`](docs/adr) and the investigations in
 - [XenosRecomp](https://github.com/hedge-dev/XenosRecomp) by hedge-dev, the shader converter
 - [wwe-svr2011-pc](https://github.com/KaikoClanworth1/wwe-svr2011-pc) by KaikoClanworth1, where the
   scripted input, the session script and parts of the shader converter and in-game settings
-  patches started
+  patches started; used with the author's permission
 - [nex-go](https://github.com/PretendoNetwork/nex-go) by Pretendo Network, which the game server uses
   for the game's online protocol
 - AMD FidelityFX CAS, for sharpening
