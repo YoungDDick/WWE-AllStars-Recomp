@@ -16,12 +16,15 @@ and refuses anything else.
 **[Download the latest release](../../releases/latest)** · [What works](#what-works) ·
 [Install](#play-it) · [FAQ](#faq) · [Build from source](#build-from-source)
 
+<!-- The 30 s teaser plays here: drag out/launch/WWE-AllStars-Recomp-teaser-720p.mp4 into
+     GitHub's editor and put the github.com/user-attachments URL it gives on its own line. -->
+
 <p align="center">
   <a href="https://www.youtube.com/watch?v=VIDEO_ID">
-    <img src="docs/images/video-thumbnail.jpg" alt="Video: boot to pinfall, one full match, unedited" width="70%">
+    <img src="docs/images/video-card.jpg" alt="Watch the full match on YouTube: Chris Jericho vs CM Punk" width="80%">
   </a>
   <br>
-  <sub>Boot to pinfall, one full Exhibition match, unedited (YouTube, 5:35)</sub>
+  <sub>The full match on YouTube, Chris Jericho vs CM Punk, recorded on Windows 11 with an RX 7900 XT</sub>
 </p>
 
 ## What works

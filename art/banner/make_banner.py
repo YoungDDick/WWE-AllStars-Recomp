@@ -4,7 +4,8 @@
 
 Writes banner.jpg (1600x560, the README header), social-preview.jpg (1280x640, uploaded
 in the repository settings; GitHub takes up to 1 MB) and video-thumbnail.jpg (1280x720, the
-YouTube thumbnail and the README's video link). The screenshot fills the frame's height
+YouTube thumbnail), and with --card video-card.jpg (1280x720, the README's link to the full
+video: a frame with a play button and the duration). The screenshot fills the frame's height
 (times --zoom), moved so the point at --subject of its width sits right of the type. The left
 side is darkened to the launcher's Ink so the type stays readable. Type and colours are the launcher's
 (launcher/src/Launcher.App/Theme.axaml): Anton and Barlow Condensed, Ink, Gold, Text.
@@ -25,9 +26,9 @@ MUTED = (154, 168, 208)
 BANNER = ("UNOFFICIAL PC PORT  ·  XBOX 360", "WWE ALL STARS", "RECOMP",
           "Statically recompiled to native x86-64. Vulkan renderer.",
           "Bring your own disc. No game files included.")
-THUMBNAIL = ("WWE ALL STARS RECOMP  ·  1.0.0", "BOOT TO PINFALL", "ONE FULL MATCH, UNEDITED",
-             "Native PC build of the Xbox 360 game.",
-             "Recorded on Windows 11, RX 7900 XT.")
+THUMBNAIL = ("UNOFFICIAL PC PORT  ·  XBOX 360", "WWE ALL STARS", "RUNNING NATIVELY ON PC",
+             "Statically recompiled. Vulkan renderer.",
+             "Chris Jericho vs CM Punk, full match.")
 
 
 def place(image, width, height, subject, zoom):
@@ -97,12 +98,33 @@ def render(shot, width, height, subject, zoom, scale, lines):
     return base
 
 
+def video_card(shot, duration):
+    """The README's link to the full video: the shot as a video frame, a play button and the
+    duration, as a video player shows them. 1280x720."""
+    width, height = 1280, 720
+    frame = shot.resize((width, height), Image.Resampling.LANCZOS)
+    frame = Image.blend(frame, Image.new("RGB", (width, height), INK), 0.18)
+    draw = ImageDraw.Draw(frame, "RGBA")
+    cx, cy, r = width // 2, height // 2, 66
+    draw.ellipse((cx - r - 4, cy - r - 4, cx + r + 4, cy + r + 4), fill=(7, 10, 20, 110))
+    draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=GOLD)
+    draw.polygon([(cx - 20, cy - 32), (cx - 20, cy + 32), (cx + 34, cy)], fill=INK)
+    badge = ImageFont.truetype(str(FONTS / "BarlowCondensed-SemiBold.ttf"), 30)
+    text_width = draw.textlength(duration, font=badge)
+    x1, y1 = width - 24, height - 24
+    draw.rounded_rectangle((x1 - text_width - 24, y1 - 42, x1, y1), radius=6, fill=(7, 10, 20, 215))
+    draw.text((x1 - text_width - 12, y1 - 39), duration, font=badge, fill=TEXT)
+    return frame
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("screenshot")
     parser.add_argument("--subject", type=float, default=0.5)
     parser.add_argument("--zoom", type=float, default=1.0)
     parser.add_argument("--out", default=str(ROOT / "docs/images"))
+    parser.add_argument("--card", help="a screenshot for the README's video card (video-card.jpg)")
+    parser.add_argument("--duration", default="5:35", help="the full video's length, shown on the card")
     args = parser.parse_args()
     shot = Image.open(args.screenshot).convert("RGB")
     out = Path(args.out)
@@ -114,6 +136,9 @@ def main():
         render(shot, width, height, args.subject, args.zoom, scale, lines).save(path, quality=88, optimize=True, progressive=True)
         if path.stat().st_size > 1_000_000:
             raise SystemExit(f"{path} is over GitHub's 1 MB limit for a social preview")
+    if args.card:
+        card = Image.open(args.card).convert("RGB")
+        video_card(card, args.duration).save(out / "video-card.jpg", quality=88, optimize=True, progressive=True)
 
 
 if __name__ == "__main__":
