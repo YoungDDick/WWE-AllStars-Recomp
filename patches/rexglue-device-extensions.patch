@@ -1,0 +1,471 @@
+diff --git a/include/rex/ui/vulkan/device.h b/include/rex/ui/vulkan/device.h
+index f7620cd..3ffc96d 100644
+--- a/include/rex/ui/vulkan/device.h
++++ b/include/rex/ui/vulkan/device.h
+@@ -181,6 +181,25 @@ class VulkanDevice {
+     // VK_EXT_robustness2
+ 
+     bool nullDescriptor = false;
++
++    // Optional functionality for stutter-free pipelines and pacing, all off when the device
++    // lacks it or vulkan_force_legacy_device is set (rex/ui/vulkan/device_extension_plan.h).
++
++    // VK_EXT_graphics_pipeline_library (#321)
++    bool graphicsPipelineLibrary = false;
++    bool graphicsPipelineLibraryFastLinking = false;
++    bool graphicsPipelineLibraryIndependentInterpolationDecoration = false;
++    // VK_EXT_extended_dynamic_state and the core part of VK_EXT_extended_dynamic_state2
++    // (promoted to 1.3); the functions are in Functions.
++    bool extendedDynamicState = false;
++    // VK_KHR_present_id2 / VK_KHR_present_wait2 (#480 / #481). Surface support is a
++    // separate surface capability.
++    bool presentId2 = false;
++    bool presentWait2 = false;
++    // VK_KHR_present_id / VK_KHR_present_wait (#295 / #249), beside v2 where both are
++    // offered: a surface without v2 falls back to v1.
++    bool presentId = false;
++    bool presentWait = false;
+   };
+ 
+   // Properties of the core API and enabled extensions, and enabled features.
+@@ -212,6 +231,12 @@ class VulkanDevice {
+     bool ext_1_3_KHR_maintenance4 = false;  // #414
+     // Has optional features not implied by this being true.
+     bool ext_1_3_KHR_dynamic_rendering = false;  // #55
++    bool ext_KHR_pipeline_library = false;           // #291
++    bool ext_EXT_graphics_pipeline_library = false;  // #321
++    bool ext_KHR_present_id = false;                 // #295
++    bool ext_KHR_present_wait = false;               // #249
++    bool ext_KHR_present_id2 = false;                // #480
++    bool ext_KHR_present_wait2 = false;              // #481
+   };
+ 
+   const Extensions& extensions() const { return extensions_; }
+@@ -233,6 +258,12 @@ class VulkanDevice {
+ #include <rex/ui/vulkan/functions/device_1_3_khr_maintenance4.inc>
+     // VK_KHR_dynamic_rendering (#55, promoted to 1.3)
+ #include <rex/ui/vulkan/functions/device_1_3_khr_dynamic_rendering.inc>
++    // VK_EXT_extended_dynamic_state(2) (#268 / #378, promoted to 1.3), loaded on 1.3 only
++#include <rex/ui/vulkan/functions/device_1_3_ext_extended_dynamic_state.inc>
++    // VK_KHR_present_wait (#249)
++#include <rex/ui/vulkan/functions/device_khr_present_wait.inc>
++    // VK_KHR_present_wait2 (#481)
++#include <rex/ui/vulkan/functions/device_khr_present_wait2.inc>
+ #undef XE_UI_VULKAN_FUNCTION_PROMOTED
+ #undef XE_UI_VULKAN_FUNCTION
+   };
+diff --git a/include/rex/ui/vulkan/device_extension_plan.h b/include/rex/ui/vulkan/device_extension_plan.h
+new file mode 100644
+index 0000000..9d86837
+--- /dev/null
++++ b/include/rex/ui/vulkan/device_extension_plan.h
+@@ -0,0 +1,116 @@
++#pragma once
++// Optional device functionality for stutter-free pipelines and pacing: graphics pipeline
++// libraries, the Vulkan 1.3 extended dynamic states and present-wait (v2, then v1).
++// Free of Vulkan types so the choice can be tested without a GPU.
++
++#include <string>
++#include <vector>
++
++namespace rex {
++namespace ui {
++namespace vulkan {
++
++// Extensions the device (and, for present_id2, the instance) lists.
++struct DeviceOffer {
++  bool vulkan_1_3 = false;
++  bool surface_capabilities2 = false;      // instance: VK_KHR_get_surface_capabilities2
++  bool pipeline_library = false;           // VK_KHR_pipeline_library
++  bool graphics_pipeline_library = false;  // VK_EXT_graphics_pipeline_library
++  bool present_id2 = false;                // VK_KHR_present_id2
++  bool present_wait2 = false;              // VK_KHR_present_wait2
++  bool present_id = false;                 // VK_KHR_present_id
++  bool present_wait = false;               // VK_KHR_present_wait
++};
++
++// Extensions to enable.
++struct DeviceRequest {
++  bool pipeline_library = false;
++  bool graphics_pipeline_library = false;
++  bool present_id2 = false;
++  bool present_wait2 = false;
++  bool present_id = false;
++  bool present_wait = false;
++};
++
++// `forced_off` is the developer switch that tests the paths for devices without them.
++inline DeviceRequest RequestOptionalExtensions(const DeviceOffer& offer, bool with_gpu_emulation,
++                                               bool with_swapchain, bool forced_off) {
++  DeviceRequest request;
++  if (forced_off) {
++    return request;
++  }
++  if (with_gpu_emulation) {
++    // VK_EXT_graphics_pipeline_library requires VK_KHR_pipeline_library.
++    request.graphics_pipeline_library = offer.pipeline_library && offer.graphics_pipeline_library;
++    request.pipeline_library = request.graphics_pipeline_library;
++  }
++  if (with_swapchain) {
++    // Waiting needs the ids; present_id2 needs VK_KHR_get_surface_capabilities2.
++    request.present_id2 = request.present_wait2 =
++        offer.surface_capabilities2 && offer.present_id2 && offer.present_wait2;
++    request.present_id = request.present_wait = offer.present_id && offer.present_wait;
++  }
++  return request;
++}
++
++// Feature bits and properties the driver reports for the requested extensions.
++struct DeviceFeatureOffer {
++  bool graphicsPipelineLibrary = false;
++  bool graphicsPipelineLibraryFastLinking = false;
++  bool graphicsPipelineLibraryIndependentInterpolationDecoration = false;
++  bool presentId2 = false;
++  bool presentWait2 = false;
++  bool presentId = false;
++  bool presentWait = false;
++};
++
++// What the device enables and the renderers may use.
++struct OptionalFeatures {
++  bool graphicsPipelineLibrary = false;
++  bool graphicsPipelineLibraryFastLinking = false;
++  bool graphicsPipelineLibraryIndependentInterpolationDecoration = false;
++  // EDS1 and the core part of EDS2, both core in Vulkan 1.3.
++  bool extendedDynamicState = false;
++  bool presentId2 = false;
++  bool presentWait2 = false;
++  // v1 beside v2, for surfaces without v2.
++  bool presentId = false;
++  bool presentWait = false;
++};
++
++inline OptionalFeatures EnableOptionalFeatures(const DeviceRequest& request,
++                                               const DeviceFeatureOffer& offer, bool vulkan_1_3,
++                                               bool forced_off) {
++  OptionalFeatures f;
++  f.graphicsPipelineLibrary = request.graphics_pipeline_library && offer.graphicsPipelineLibrary;
++  f.graphicsPipelineLibraryFastLinking =
++      f.graphicsPipelineLibrary && offer.graphicsPipelineLibraryFastLinking;
++  f.graphicsPipelineLibraryIndependentInterpolationDecoration =
++      f.graphicsPipelineLibrary && offer.graphicsPipelineLibraryIndependentInterpolationDecoration;
++  f.extendedDynamicState = vulkan_1_3 && !forced_off;
++  f.presentId2 = f.presentWait2 = request.present_id2 && request.present_wait2 &&
++                                  offer.presentId2 && offer.presentWait2;
++  f.presentId = f.presentWait =
++      request.present_id && request.present_wait && offer.presentId && offer.presentWait;
++  return f;
++}
++
++// One "name: on|off" line per feature; present ids are implied by their waits.
++inline std::vector<std::string> DescribeOptionalFeatures(const OptionalFeatures& f) {
++  const auto line = [](const char* name, bool on) {
++    return std::string(name) + (on ? ": on" : ": off");
++  };
++  return {
++      line("graphicsPipelineLibrary", f.graphicsPipelineLibrary),
++      line("graphicsPipelineLibraryFastLinking", f.graphicsPipelineLibraryFastLinking),
++      line("graphicsPipelineLibraryIndependentInterpolationDecoration",
++           f.graphicsPipelineLibraryIndependentInterpolationDecoration),
++      line("extendedDynamicState", f.extendedDynamicState),
++      line("presentWait2", f.presentWait2),
++      line("presentWait", f.presentWait),
++  };
++}
++
++}  // namespace vulkan
++}  // namespace ui
++}  // namespace rex
+diff --git a/include/rex/ui/vulkan/functions/device_1_3_ext_extended_dynamic_state.inc b/include/rex/ui/vulkan/functions/device_1_3_ext_extended_dynamic_state.inc
+new file mode 100644
+index 0000000..3a1024d
+--- /dev/null
++++ b/include/rex/ui/vulkan/functions/device_1_3_ext_extended_dynamic_state.inc
+@@ -0,0 +1,17 @@
++// VK_EXT_extended_dynamic_state and VK_EXT_extended_dynamic_state2 functions
++// used in ReXGlue. Promoted to Vulkan 1.3 core, only loaded there.
++XE_UI_VULKAN_FUNCTION_PROMOTED(vkCmdSetCullModeEXT, vkCmdSetCullMode)
++XE_UI_VULKAN_FUNCTION_PROMOTED(vkCmdSetFrontFaceEXT, vkCmdSetFrontFace)
++XE_UI_VULKAN_FUNCTION_PROMOTED(vkCmdSetPrimitiveTopologyEXT, vkCmdSetPrimitiveTopology)
++XE_UI_VULKAN_FUNCTION_PROMOTED(vkCmdSetViewportWithCountEXT, vkCmdSetViewportWithCount)
++XE_UI_VULKAN_FUNCTION_PROMOTED(vkCmdSetScissorWithCountEXT, vkCmdSetScissorWithCount)
++XE_UI_VULKAN_FUNCTION_PROMOTED(vkCmdBindVertexBuffers2EXT, vkCmdBindVertexBuffers2)
++XE_UI_VULKAN_FUNCTION_PROMOTED(vkCmdSetDepthTestEnableEXT, vkCmdSetDepthTestEnable)
++XE_UI_VULKAN_FUNCTION_PROMOTED(vkCmdSetDepthWriteEnableEXT, vkCmdSetDepthWriteEnable)
++XE_UI_VULKAN_FUNCTION_PROMOTED(vkCmdSetDepthCompareOpEXT, vkCmdSetDepthCompareOp)
++XE_UI_VULKAN_FUNCTION_PROMOTED(vkCmdSetDepthBoundsTestEnableEXT, vkCmdSetDepthBoundsTestEnable)
++XE_UI_VULKAN_FUNCTION_PROMOTED(vkCmdSetStencilTestEnableEXT, vkCmdSetStencilTestEnable)
++XE_UI_VULKAN_FUNCTION_PROMOTED(vkCmdSetStencilOpEXT, vkCmdSetStencilOp)
++XE_UI_VULKAN_FUNCTION_PROMOTED(vkCmdSetRasterizerDiscardEnableEXT, vkCmdSetRasterizerDiscardEnable)
++XE_UI_VULKAN_FUNCTION_PROMOTED(vkCmdSetDepthBiasEnableEXT, vkCmdSetDepthBiasEnable)
++XE_UI_VULKAN_FUNCTION_PROMOTED(vkCmdSetPrimitiveRestartEnableEXT, vkCmdSetPrimitiveRestartEnable)
+diff --git a/include/rex/ui/vulkan/functions/device_khr_present_wait.inc b/include/rex/ui/vulkan/functions/device_khr_present_wait.inc
+new file mode 100644
+index 0000000..be6071c
+--- /dev/null
++++ b/include/rex/ui/vulkan/functions/device_khr_present_wait.inc
+@@ -0,0 +1,2 @@
++// VK_KHR_present_wait functions used in ReXGlue.
++XE_UI_VULKAN_FUNCTION(vkWaitForPresentKHR)
+diff --git a/include/rex/ui/vulkan/functions/device_khr_present_wait2.inc b/include/rex/ui/vulkan/functions/device_khr_present_wait2.inc
+new file mode 100644
+index 0000000..a061a5f
+--- /dev/null
++++ b/include/rex/ui/vulkan/functions/device_khr_present_wait2.inc
+@@ -0,0 +1,2 @@
++// VK_KHR_present_wait2 functions used in ReXGlue.
++XE_UI_VULKAN_FUNCTION(vkWaitForPresent2KHR)
+diff --git a/include/rex/ui/vulkan/functions/instance_khr_get_surface_capabilities2.inc b/include/rex/ui/vulkan/functions/instance_khr_get_surface_capabilities2.inc
+new file mode 100644
+index 0000000..e7649bb
+--- /dev/null
++++ b/include/rex/ui/vulkan/functions/instance_khr_get_surface_capabilities2.inc
+@@ -0,0 +1,2 @@
++// VK_KHR_get_surface_capabilities2 functions used in ReXGlue.
++XE_UI_VULKAN_FUNCTION(vkGetPhysicalDeviceSurfaceCapabilities2KHR)
+diff --git a/include/rex/ui/vulkan/instance.h b/include/rex/ui/vulkan/instance.h
+index 4edde2b..50f3bea 100644
+--- a/include/rex/ui/vulkan/instance.h
++++ b/include/rex/ui/vulkan/instance.h
+@@ -79,6 +79,8 @@ class VulkanInstance {
+ #include <rex/ui/vulkan/functions/instance_1_1_khr_get_physical_device_properties2.inc>
+     // VK_EXT_debug_utils (#129)
+ #include <rex/ui/vulkan/functions/instance_ext_debug_utils.inc>
++    // VK_KHR_get_surface_capabilities2 (#120)
++#include <rex/ui/vulkan/functions/instance_khr_get_surface_capabilities2.inc>
+ #undef XE_UI_VULKAN_FUNCTION_PROMOTED
+ #undef XE_UI_VULKAN_FUNCTION
+   };
+@@ -109,6 +111,7 @@ class VulkanInstance {
+     bool ext_1_1_KHR_get_physical_device_properties2 = false;  // #60
+     bool ext_EXT_debug_utils = false;                          // #129
+     bool ext_KHR_portability_enumeration = false;              // #395
++    bool ext_KHR_get_surface_capabilities2 = false;            // #120
+   };
+ 
+   const Extensions& extensions() const { return extensions_; }
+diff --git a/src/ui/vulkan/vulkan_device.cpp b/src/ui/vulkan/vulkan_device.cpp
+index ab7bb81..cdf7fad 100644
+--- a/src/ui/vulkan/vulkan_device.cpp
++++ b/src/ui/vulkan/vulkan_device.cpp
+@@ -21,6 +21,7 @@
+ #include <rex/platform.h>
+ #include <rex/string.h>
+ #include <rex/ui/vulkan/device.h>
++#include <rex/ui/vulkan/device_extension_plan.h>
+ 
+ REXCVAR_DEFINE_BOOL(vulkan_require_fragment_stores_and_atomics, true, "UI/Vulkan",
+                     "Deprecated and ignored for parity; fragmentStoresAndAtomics is always "
+@@ -40,6 +41,10 @@ REXCVAR_DEFINE_BOOL(vulkan_require_fill_mode_non_solid, !REX_PLATFORM_MAC, "UI/V
+                     "Require fillModeNonSolid support for Vulkan GPU emulation (disable to "
+                     "allow fallback to solid fill for line/point polygon modes)")
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_BOOL(vulkan_force_legacy_device, false, "UI/Vulkan",
++                    "Developer: do not enable graphics pipeline libraries, extended dynamic state "
++                    "or present-wait, to test the paths for devices without them")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ 
+ namespace rex {
+ namespace ui {
+@@ -248,6 +253,21 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+ #undef XE_UI_VULKAN_STRUCT_PROMOTED_EXTENSION
+ #undef XE_UI_VULKAN_LOCAL_PROMOTED_EXTENSION
+ 
++  // Optional extensions are only noted here; which ones to enable depends on the whole set.
++  DeviceOffer optional_offer;
++  optional_offer.vulkan_1_3 = properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 3, 0);
++  optional_offer.surface_capabilities2 =
++      vulkan_instance->extensions().ext_KHR_get_surface_capabilities2;
++  const std::unordered_map<std::string, bool*> optional_extensions = {
++      {"VK_KHR_pipeline_library", &optional_offer.pipeline_library},
++      {"VK_EXT_graphics_pipeline_library", &optional_offer.graphics_pipeline_library},
++      {"VK_KHR_present_id2", &optional_offer.present_id2},
++      {"VK_KHR_present_wait2", &optional_offer.present_wait2},
++      {"VK_KHR_present_id", &optional_offer.present_id},
++      {"VK_KHR_present_wait", &optional_offer.present_wait},
++  };
++  const bool force_legacy_device = REXCVAR_GET(vulkan_force_legacy_device);
++
+   std::vector<const char*> enabled_extensions;
+   {
+     uint32_t supported_extension_count = 0;
+@@ -268,6 +288,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+       }
+       assert_true(supported_extension_count == supported_extensions.size());
+       for (const VkExtensionProperties& supported_extension : supported_extensions) {
++        const auto optional_extension_it =
++            optional_extensions.find(supported_extension.extensionName);
++        if (optional_extension_it != optional_extensions.cend()) {
++          *optional_extension_it->second = true;
++          continue;
++        }
+         const auto requested_extension_it =
+             requested_extensions.find(supported_extension.extensionName);
+         if (requested_extension_it == requested_extensions.cend()) {
+@@ -287,6 +313,28 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+     return nullptr;
+   }
+ 
++  const DeviceRequest optional_request = RequestOptionalExtensions(
++      optional_offer, with_gpu_emulation, with_swapchain, force_legacy_device);
++  {
++    const auto enable_optional = [&](bool requested, const char* name, bool& enabled) {
++      if (requested) {
++        enabled_extensions.push_back(name);
++        enabled = true;
++      }
++    };
++    Extensions& ext = device->extensions_;
++    enable_optional(optional_request.pipeline_library, "VK_KHR_pipeline_library",
++                    ext.ext_KHR_pipeline_library);
++    enable_optional(optional_request.graphics_pipeline_library,
++                    "VK_EXT_graphics_pipeline_library", ext.ext_EXT_graphics_pipeline_library);
++    enable_optional(optional_request.present_id2, "VK_KHR_present_id2", ext.ext_KHR_present_id2);
++    enable_optional(optional_request.present_wait2, "VK_KHR_present_wait2",
++                    ext.ext_KHR_present_wait2);
++    enable_optional(optional_request.present_id, "VK_KHR_present_id", ext.ext_KHR_present_id);
++    enable_optional(optional_request.present_wait, "VK_KHR_present_wait",
++                    ext.ext_KHR_present_wait);
++  }
++
+   VkDeviceCreateInfo device_create_info = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+ 
+   device_create_info.enabledExtensionCount = uint32_t(enabled_extensions.size());
+@@ -335,6 +383,23 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+   VulkanFeatures<VkPhysicalDeviceRobustness2FeaturesEXT,
+                  VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT>
+       features_EXT_robustness2;
++  VulkanFeatures<VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT,
++                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT>
++      features_EXT_graphics_pipeline_library;
++  VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT properties_EXT_graphics_pipeline_library = {
++      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT};
++  VulkanFeatures<VkPhysicalDevicePresentId2FeaturesKHR,
++                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_2_FEATURES_KHR>
++      features_KHR_present_id2;
++  VulkanFeatures<VkPhysicalDevicePresentWait2FeaturesKHR,
++                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_2_FEATURES_KHR>
++      features_KHR_present_wait2;
++  VulkanFeatures<VkPhysicalDevicePresentIdFeaturesKHR,
++                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR>
++      features_KHR_present_id;
++  VulkanFeatures<VkPhysicalDevicePresentWaitFeaturesKHR,
++                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR>
++      features_KHR_present_wait;
+ 
+   if (get_physical_device_properties2_supported) {
+     if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {
+@@ -376,6 +441,23 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+     if (device->extensions_.ext_EXT_robustness2) {
+       features_EXT_robustness2.Link(supported_features_2, device_create_info);
+     }
++    if (device->extensions_.ext_EXT_graphics_pipeline_library) {
++      features_EXT_graphics_pipeline_library.Link(supported_features_2, device_create_info);
++      properties_EXT_graphics_pipeline_library.pNext = properties_2.pNext;
++      properties_2.pNext = &properties_EXT_graphics_pipeline_library;
++    }
++    if (device->extensions_.ext_KHR_present_id2) {
++      features_KHR_present_id2.Link(supported_features_2, device_create_info);
++    }
++    if (device->extensions_.ext_KHR_present_wait2) {
++      features_KHR_present_wait2.Link(supported_features_2, device_create_info);
++    }
++    if (device->extensions_.ext_KHR_present_id) {
++      features_KHR_present_id.Link(supported_features_2, device_create_info);
++    }
++    if (device->extensions_.ext_KHR_present_wait) {
++      features_KHR_present_wait.Link(supported_features_2, device_create_info);
++    }
+     ifn.vkGetPhysicalDeviceProperties2(physical_device, &properties_2);
+     ifn.vkGetPhysicalDeviceFeatures2(physical_device, &supported_features_2);
+   }
+@@ -740,6 +822,44 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+     }
+   }
+ 
++  {
++    DeviceFeatureOffer feature_offer;
++    feature_offer.graphicsPipelineLibrary =
++        features_EXT_graphics_pipeline_library.supported.graphicsPipelineLibrary;
++    feature_offer.graphicsPipelineLibraryFastLinking =
++        properties_EXT_graphics_pipeline_library.graphicsPipelineLibraryFastLinking;
++    feature_offer.graphicsPipelineLibraryIndependentInterpolationDecoration =
++        properties_EXT_graphics_pipeline_library
++            .graphicsPipelineLibraryIndependentInterpolationDecoration;
++    feature_offer.presentId2 = features_KHR_present_id2.supported.presentId2;
++    feature_offer.presentWait2 = features_KHR_present_wait2.supported.presentWait2;
++    feature_offer.presentId = features_KHR_present_id.supported.presentId;
++    feature_offer.presentWait = features_KHR_present_wait.supported.presentWait;
++    const OptionalFeatures optional = EnableOptionalFeatures(
++        optional_request, feature_offer, optional_offer.vulkan_1_3, force_legacy_device);
++    features_EXT_graphics_pipeline_library.enabled.graphicsPipelineLibrary =
++        optional.graphicsPipelineLibrary;
++    features_KHR_present_id2.enabled.presentId2 = optional.presentId2;
++    features_KHR_present_wait2.enabled.presentWait2 = optional.presentWait2;
++    features_KHR_present_id.enabled.presentId = optional.presentId;
++    features_KHR_present_wait.enabled.presentWait = optional.presentWait;
++    Properties& p = device->properties_;
++    p.graphicsPipelineLibrary = optional.graphicsPipelineLibrary;
++    p.graphicsPipelineLibraryFastLinking = optional.graphicsPipelineLibraryFastLinking;
++    p.graphicsPipelineLibraryIndependentInterpolationDecoration =
++        optional.graphicsPipelineLibraryIndependentInterpolationDecoration;
++    p.extendedDynamicState = optional.extendedDynamicState;
++    p.presentId2 = optional.presentId2;
++    p.presentWait2 = optional.presentWait2;
++    p.presentId = optional.presentId;
++    p.presentWait = optional.presentWait;
++    REXLOG_INFO("Vulkan optional device features{}:",
++                force_legacy_device ? " (forced off by vulkan_force_legacy_device)" : "");
++    for (const std::string& line : DescribeOptionalFeatures(optional)) {
++      REXLOG_INFO("* {}", line);
++    }
++  }
++
+ #undef XE_UI_VULKAN_LIMIT
+ #undef XE_UI_VULKAN_ENUM_LIMIT
+ #undef XE_UI_VULKAN_FEATURE
+@@ -784,6 +904,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+   if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 3, 0)) {
+ #include <rex/ui/vulkan/functions/device_1_3_khr_dynamic_rendering.inc>
+ #include <rex/ui/vulkan/functions/device_1_3_khr_maintenance4.inc>
++#include <rex/ui/vulkan/functions/device_1_3_ext_extended_dynamic_state.inc>
+   }
+ #undef XE_UI_VULKAN_FUNCTION_PROMOTED
+ 
+@@ -811,6 +932,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+   if (device->extensions_.ext_KHR_swapchain) {
+ #include <rex/ui/vulkan/functions/device_khr_swapchain.inc>
+   }
++  if (device->extensions_.ext_KHR_present_wait) {
++#include <rex/ui/vulkan/functions/device_khr_present_wait.inc>
++  }
++  if (device->extensions_.ext_KHR_present_wait2) {
++#include <rex/ui/vulkan/functions/device_khr_present_wait2.inc>
++  }
+ #undef XE_UI_VULKAN_FUNCTION_PROMOTED
+ 
+ #undef XE_UI_VULKAN_FUNCTION
+diff --git a/src/ui/vulkan/vulkan_instance.cpp b/src/ui/vulkan/vulkan_instance.cpp
+index 914b311..1a72d1f 100644
+--- a/src/ui/vulkan/vulkan_instance.cpp
++++ b/src/ui/vulkan/vulkan_instance.cpp
+@@ -140,6 +140,9 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
+   if (with_surface) {
+     // #1.
+     requested_extensions.emplace("VK_KHR_surface", &vulkan_instance->extensions_.ext_KHR_surface);
++    // #120. Needed by VK_KHR_present_id2 / VK_KHR_present_wait2.
++    requested_extensions.emplace("VK_KHR_get_surface_capabilities2",
++                                 &vulkan_instance->extensions_.ext_KHR_get_surface_capabilities2);
+ #ifdef VK_USE_PLATFORM_XCB_KHR
+     // #6.
+     requested_extensions.emplace("VK_KHR_xcb_surface",
+@@ -440,6 +443,9 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
+ #endif
+   if (vulkan_instance->extensions_.ext_KHR_surface) {
+ #include <rex/ui/vulkan/functions/instance_khr_surface.inc>
++  }
++  if (vulkan_instance->extensions_.ext_KHR_get_surface_capabilities2) {
++#include <rex/ui/vulkan/functions/instance_khr_get_surface_capabilities2.inc>
+   }
+   if (vulkan_instance->extensions_.ext_EXT_debug_utils) {
+ #include <rex/ui/vulkan/functions/instance_ext_debug_utils.inc>

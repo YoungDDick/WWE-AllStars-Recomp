@@ -1,0 +1,32 @@
+# Original game data and locally generated translations stay local.
+*.iso
+*.xex
+*.xexp
+*.xex.delta
+*.pe
+/assets/
+/gamedata/
+# Title Update 2's files (update:), unpacked from the owner's own package.
+/updatedata/
+/dlc/
+/generated/*
+!/generated/rexglue.cmake
+/analysis/
+/.tools/
+/out/
+/build/
+__pycache__/
+*.pyc
+/logs/
+/cache/
+/userdata/
+/shader-cache/
+/ghidra/
+/src/d3d_sweep.gen.cpp
+/src/d3d_sweep_count.h
+# rexglue init writes the disc's title image here; cmake/no_game_art.cmake fails the build if it exists.
+/metadata/
+# The game server's local config holds the title's access key.
+allstars-server.json
+# nex-go's logger writes a log/ folder next to wherever it runs.
+/server/**/log/

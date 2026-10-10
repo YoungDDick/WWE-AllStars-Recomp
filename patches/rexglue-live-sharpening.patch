@@ -1,0 +1,42 @@
+diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
+index 129d732..50b2935 100644
+--- a/include/rex/ui/presenter.h
++++ b/include/rex/ui/presenter.h
+@@ -378,6 +378,11 @@ class Presenter {
+   }
+   // For simplicity, may be called repeatedly even if no changes have been made.
+   void SetGuestOutputPaintConfigFromUIThread(const GuestOutputPaintConfig& new_config);
++  // Switches the effect between CAS at the given sharpness and bilinear, the
++  // rest of the paint config unchanged. Takes no GuestOutputPaintConfig, so
++  // code built without REX_HAS_FIDELITYFX_SDK can call it (WWE: live
++  // sharpening). Does nothing without the FidelityFX SDK.
++  void SetCasFromUIThread(bool enabled, float sharpness);
+ 
+   void AddUIDrawerFromUIThread(UIDrawer* drawer, size_t z_order);
+   void RemoveUIDrawerFromUIThread(UIDrawer* drawer);
+diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
+index ffb869c..601c51b 100644
+--- a/src/ui/presenter.cpp
++++ b/src/ui/presenter.cpp
+@@ -1057,6 +1057,21 @@ void Presenter::SetGuestOutputPaintConfigFromUIThread(const GuestOutputPaintConf
+   }
+ }
+ 
++void Presenter::SetCasFromUIThread(bool enabled, float sharpness) {
++#if defined(REX_HAS_FIDELITYFX_SDK)
++  GuestOutputPaintConfig config = guest_output_paint_config_;
++  config.SetEffect(enabled ? GuestOutputPaintConfig::Effect::kCas
++                           : GuestOutputPaintConfig::Effect::kBilinear);
++  if (enabled) {
++    config.SetCasAdditionalSharpness(sharpness);
++  }
++  SetGuestOutputPaintConfigFromUIThread(config);
++#else
++  (void)enabled;
++  (void)sharpness;
++#endif
++}
++
+ void Presenter::AddUIDrawerFromUIThread(UIDrawer* drawer, size_t z_order) {
+   assert_not_null(drawer);
+   // Obtain whether the iterator list was empty before erasing in case of

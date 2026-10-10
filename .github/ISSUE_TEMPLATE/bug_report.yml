@@ -1,0 +1,69 @@
+name: Bug report
+description: A crash, wrong graphics, a hang, or something that plays differently from the Xbox 360.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. A session log makes most problems fixable: in the launcher choose
+        **Open logs**, zip the folder it opens and attach the zip below. A log can contain
+        folder paths that show your Windows user name; check it before posting.
+
+        Don't attach or link game files, disc images, the title update or DLC.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The launcher's About screen shows it, for example 1.0.0+b36707a.
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver version
+      description: The model, and the driver version from AMD Software, the NVIDIA app or Intel Arc Control.
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: System
+      options:
+        - Windows 11
+        - Windows 10
+        - Steam Deck
+        - Linux (Proton or Wine)
+    validations:
+      required: true
+  - type: dropdown
+    id: renderer
+    attributes:
+      label: Renderer
+      description: Settings > GRAPHICS > Renderer.
+      options:
+        - Native
+        - Emulated
+        - Both
+    validations:
+      required: true
+  - type: input
+    id: mode
+    attributes:
+      label: Game mode
+      placeholder: Exhibition 1v1, Path of Champions, Player Match online...
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you saw. Screenshots (F12 in game) help.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Session log
+      description: Drag the zipped session folder here.
+    validations:
+      required: true

@@ -1,0 +1,27 @@
+Components shipped in the release zip
+=====================================
+
+The full licence texts copied from each component's sources are beside this
+file. Components whose sources carry no licence file are listed here.
+
+game\wweallstars.exe and its DLLs
+  WWE All Stars Recomp (BSD-3-Clause): WWEAllStarsRecomp-LICENSE.txt
+  ReXGlue SDK runtime: rexglue-LICENSE.txt, and rexglue-<component>-*.txt for
+  the libraries it builds in.
+  AMD FidelityFX SDK (CAS and FSR 1 output filters), when built in:
+  FidelityFX-SDK-LICENSE.txt
+
+WWEAllStarsLauncher.exe
+  launcher-THIRD-PARTY-NOTICES.txt (Avalonia, .NET, SkiaSharp, HarfBuzzSharp,
+  ANGLE, the bundled fonts).
+
+xenosrecomp\
+  XenosRecomp (re:Blue fork, MIT): XenosRecomp-LICENSE.txt, and
+  XenosRecomp-<component>-*.txt for the libraries it builds in.
+  dxcompiler.dll: Microsoft DirectX Shader Compiler, University of
+  Illinois/NCSA Open Source License,
+  https://github.com/microsoft/DirectXShaderCompiler/blob/main/LICENSE.TXT
+
+msvcp140*.dll, vcruntime140*.dll (in game\ and xenosrecomp\)
+  Microsoft Visual C++ Redistributable, distributed under the Visual Studio
+  licence terms for redistributable code.

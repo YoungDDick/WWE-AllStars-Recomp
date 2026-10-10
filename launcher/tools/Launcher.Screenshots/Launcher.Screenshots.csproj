@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Renders each launcher screen to PNG without a real window and without starting the game:
+    the welcome, home, Settings and About screens at 100 % and 200 % scaling (spec, "Testing
+    Decisions": views are checked by screenshots). Output goes to out/screenshots (ignored);
+    the home screen uses the developer's own nxeart when one is given, so it never enters Git.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>WweAllStars.Launcher.Screenshots</RootNamespace>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia.Headless" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Launcher.App/Launcher.App.csproj" />
+  </ItemGroup>
+</Project>

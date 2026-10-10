@@ -1,0 +1,443 @@
+# Created with ReXGlue v0.10.0; the function seeds below are maintained by hand.
+
+[project]
+name = "wweallstars"
+sdk_version = "0.10.0"
+game_root = "assets"
+
+[entrypoint]
+file_path = "assets/default.xex"
+out_directory_path = "generated/default"
+includes = []
+
+# Indirect call targets the v0.10.0 discovery pass misses. Entries are seed
+# addresses; analysis finds their instruction boundaries.
+# Verified input: default.xex SHA-256 521c2325d89470ff490efee257885a465360ffb64f9db2491eda6af7ab3a6892
+# plus Title Update 2 (assets/default.xexp, a6a4570439c1a26114199b829461e772a077638d11add2b6faeff31acb1ced6a),
+# which codegen applies. Every address here is in the TU2 image: scripts/tu_addrmap.py
+# moved them from base v5 (ADR-0022, report in .scratch/tu2-dlc/issues/01-tu2-addrmap-report.md).
+[entrypoint.functions]
+# Leaf parameter getters/setters reached only through tables. Each ends in a
+# backward tail branch to its own "li r3,0; blr", which discovery leaves orphaned.
+0x83049308 = {}
+0x830640D8 = {}
+0x830641F0 = {}
+# Startup: C++ static initializer (VMX128 constant setup) referenced only from
+# the pointer table at 0x83524418; first runtime miss.
+0x83405460 = {}
+# Vtable and callback-table entries found by scripts/find_table_targets.py: thunks
+# (this-adjustors, tail stubs) whose only references are table slots next to
+# known functions. 0x8303D238 was the second runtime miss.
+0x825589B0 = {}  # table refs 0x82040BA4
+0x82559410 = {}  # table refs 0x82040F88
+0x827A7548 = {}  # table refs 0x82113FF8
+0x828599D0 = {}  # table refs 0x820FEC58
+0x828B4E48 = {}  # table refs 0x820C1C00
+0x8292BF88 = {}  # table refs 0x8210EBF0, 0x8210EE78, 0x8210F058
+0x8303D238 = {}  # table refs 0x822F83B0
+0x83056260 = {}  # table refs 0x822F8B84
+0x83131358 = {}  # table refs 0x8230B440
+0x8316B658 = {}  # table refs 0x8230D9EC
+0x8316F878 = {}  # table refs 0x8230DBF0
+0x83184480 = {}  # table refs 0x8230AB1C, 0x8230E4F4, 0x8230EA5C
+0x831846A0 = {}  # table refs 0x8230E9B8
+0x83184DF8 = {}  # table refs 0x8230EAEC, 0x8230EAF0
+0x831FCAA8 = {}  # table refs 0x82313DEC
+0x833526C0 = {}  # table refs 0x823240B4, 0x8232744C, 0x823274B4
+0x83369388 = {}  # table refs 0x8232C284
+0x8336D680 = {}  # table refs 0x8232C454
+0x83373590 = {}  # table refs 0x8232C448, 0x8232C560, 0x8232C6F8
+0x8336D690 = {}  # table refs 0x8232C520
+0x83373558 = {}  # table refs 0x8232C79C
+0x83373568 = {}  # table refs 0x8232C780, 0x8232C840
+0x83373840 = {}  # table refs 0x8232C424, 0x8232C53C, 0x8232C6D4
+0x83373548 = {}  # table refs 0x8232C430, 0x8232C548, 0x8232C6E0
+0x83373830 = {}  # table refs 0x8232C43C, 0x8232C554, 0x8232C6EC
+0x83373838 = {}  # table refs 0x8232C450, 0x8232C568, 0x8232C700
+0x83373580 = {}  # table refs 0x8232C810
+0x83373848 = {}  # table refs 0x8232C444, 0x8232C55C, 0x8232C6F4
+0x833796D0 = {}  # table refs 0x8232C8BC
+0x8337A350 = {}  # table refs 0x8232C96C
+0x8337A830 = {}  # table refs 0x8232C960
+0x8337D158 = {}  # table refs 0x8232CAD8
+0x8337D3E0 = {}  # table refs 0x8232CA98
+0x8336D670 = {}  # table refs 0x8232C40C, 0x8232C524, 0x8232C6BC
+0x83373588 = {}  # table refs 0x8232C420, 0x8232C538, 0x8232C6D0
+0x83373570 = {}  # table refs 0x8232C410, 0x8232C528, 0x8232C6C0
+0x83373850 = {}  # table refs 0x8232C41C, 0x8232C534, 0x8232C6CC
+0x83373550 = {}  # table refs 0x8232C414, 0x8232C52C, 0x8232C6C4
+0x83373540 = {}  # table refs 0x8232C418, 0x8232C530, 0x8232C6C8
+# TU2 branch island (ticket tu2-dlc 01): 0x8337AF20 is a lone `b 0x8337a360` after
+# the thunk 0x8337AF18 (addi r3,r3,-0x20; b 0x830f35e0), padded by 0x8337AF24
+# (.long 0). The thunks 0x8337A830 (addi r3,r3,-0x24) and 0x8337D448 (addi
+# r3,r3,-0x20) tail-branch to it. In base v5 it sat at 0x8337A428, right after the
+# seed 0x8337A420, and GapFill took it; TU2 moved it, so strict codegen reported
+# "b 0x8337AF20 ... target not in any function".
+0x8337AF20 = {}
+# TU2 table targets (tu2-dlc tickets 01 and 03): find_table_targets.py on the TU2
+# image after the first TU2 codegen listed 13; three more slots of the table at
+# 0x822AF594 followed on later passes, until it listed none. Each entry follows a
+# block end and sits in a vtable or callback table next to known functions. Their
+# base v5 counterparts were in the base build's function list; TU2's layout leaves
+# them as dead tails, so discovery needs them as seeds.
+0x824FFF60 = {}  # table refs 0x82010D58; after bctr: lis r11,-0x7dfa / lfs f1,0x5984(r11) / blr
+0x8290A5D0 = {}  # table refs 0x8205BF20, 0x8205D674, 0x8205D678; after bctr: lis r11,-0x7e00 / lfs f0,0xe90(r11) / stfs f0,0(r4)
+0x82953AE8 = {}  # table refs 0x8216BFE0, 0x8217A6A4, 0x8217EB94; after b: addi r3,r3,-0x28 / b 0x82953380
+0x829688F8 = {}  # table refs 0x820C2A74, 0x82153958; after bctr: li r3,0x24 / blr
+0x82B64F68 = {}  # table refs 0x822194F8; after bctr: lis r11,-0x7e00 / lfs f0,0xe90(r11) / stfs f0,0x50(r4)
+0x82EB0638 = {}  # table refs 0x822AF5B8; after bctr: lwz r11,0x40(r3) / lwz r10,0x30(r3) / mulli r11,r11,0x3c
+0x82EB0658 = {}  # table refs 0x822AF5BC; after bctr: the same body as 0x82EB0638
+0x82EB0678 = {}  # table refs 0x822AF5C0; after bctr: the same body as 0x82EB0638
+0x82EB0698 = {}  # table refs 0x822AF5C4, the table's last slot (two zero words follow); after bctr: same body
+0x83078B10 = {}  # table refs 0x822F9A70, 0x822FCDD0; after bctr: li r11,1 / stb r11,4(r3) / blr
+0x8311A0C8 = {}  # table refs 0x8230A13C, 0x8230ABBC, 0x8230E594; after bctr: stw r4,0x90(r3) / stw r5,0x94(r3) / blr
+0x83180348 = {}  # table refs 0x8230E5B4; after b 0x8306a918: lwz r3,0x98(r3) / lwz r11,0(r3) / lwz r11,0x30(r11)
+0x833474D8 = {}  # table refs 0x82323B38, 0x82323B58; after bctr: lwz r11,4(r3) / cntlzw r11,r11 / rlwinm r3,r11,27,31,31
+0x8336D678 = {}  # table refs 0x8232C42C, 0x8232C544, 0x8232C6DC; after b: addi r3,r3,-4 / b 0x8336d5f0
+0x83373578 = {}  # table refs 0x8232C428, 0x8232C540, 0x8232C6D8; after b: addi r3,r3,-4 / b 0x8336d5e8
+0x8338A6F8 = {}  # table refs 0x823309A0, 0x823309A4; after bctr: addi r3,r3,-4 / b 0x82ea9400
+# Same scan, with bctr counted as a block end (third runtime miss: 0x82779FE0).
+0x8242ECA0 = {}  # table refs 0x82005D20
+0x8242ECB8 = {}  # table refs 0x82005D24
+0x824825D8 = {}  # table refs 0x8202E714, 0x8202EB4C, 0x8202EF1C
+0x825034E0 = {}  # table refs 0x82013B40
+0x82616C28 = {}  # table refs 0x82006870, 0x82006DD8, 0x82007068
+0x82742248 = {}  # table refs 0x82138860
+0x82779FE0 = {}  # table refs 0x83534274
+0x8277A0C0 = {}  # table refs 0x83534310
+0x8277A0D8 = {}  # table refs 0x83534674
+0x8277A100 = {}  # table refs 0x83534678
+0x827D6820 = {}  # table refs 0x820D0BA8
+0x827D6C40 = {}  # table refs 0x820D0130
+0x827D7B78 = {}  # table refs 0x820D3A38
+0x827D7EF8 = {}  # table refs 0x820D52A8
+0x82812D10 = {}  # table refs 0x820EB2E4, 0x820EF94C, 0x820EFCBC
+0x82820FB8 = {}  # table refs 0x82017504, 0x820176EC, 0x82018CCC
+0x8290AEC0 = {}  # table refs 0x82017B34, 0x82017FCC, 0x82018454
+0x829688E8 = {}  # table refs 0x82007DDC, 0x820C21D8, 0x820C2570
+0x829DE540 = {}  # table refs 0x821311D8
+0x82A06FB0 = {}  # table refs 0x8219D134, 0x8219D43C
+0x82B22748 = {}  # table refs 0x822097D0
+0x82B22868 = {}  # table refs 0x822097F4
+0x82B22888 = {}  # table refs 0x822097F8
+0x82B228C8 = {}  # table refs 0x822097E8
+0x82712FB0 = {}  # table refs 0x8220A6C4, 0x8220A6EC, 0x8220A714
+0x82B64F58 = {}  # table refs 0x8220A6F8, 0x8220A720, 0x8220A77C
+0x82B27DD8 = {}  # table refs 0x8220A6D4
+0x82CC67F0 = {}  # table refs 0x8354A984
+0x82E1DC28 = {}  # table refs 0x822833B8, 0x82283640, 0x8228A848
+0x82E1DE50 = {}  # table refs 0x8228357C, 0x82283804, 0x8228AA0C
+0x82E1DEC8 = {}  # table refs 0x82283588, 0x82283810, 0x8228AA18
+0x82E1E2E8 = {}  # table refs 0x822835BC, 0x82283844
+0x82E1E2C0 = {}  # table refs 0x822833D0, 0x82283658
+0x82EA8B50 = {}  # table refs 0x822AEEAC
+0x82EB03A8 = {}  # table refs 0x822AF538
+0x82EB03C0 = {}  # table refs 0x822AF554
+0x82EB03E0 = {}  # table refs 0x822AF54C
+0x82EB0578 = {}  # table refs 0x822AF5A0
+0x82EB76C8 = {}  # table refs 0x822AF4DC, 0x822AF52C
+0x83043460 = {}  # table refs 0x822F8650
+0x830ADD60 = {}  # table refs 0x822FF3BC
+0x830E4BD8 = {}  # table refs 0x82306930
+0x830E6B48 = {}  # table refs 0x8230716C
+0x830E6B70 = {}  # table refs 0x82307150
+0x831011C8 = {}  # table refs 0x8230847C, 0x823084A0, 0x823084C4
+0x83119FE8 = {}  # table refs 0x8230A0E0, 0x8230AB60, 0x8230CA20
+0x83119FF8 = {}  # table refs 0x8230A0F0, 0x8230AB70, 0x8230E548
+0x83138350 = {}  # table refs 0x8230B8A0
+0x83138368 = {}  # table refs 0x8230B8BC
+0x83146750 = {}  # table refs 0x8230CC40
+0x83146810 = {}  # table refs 0x8230CC48
+0x83146828 = {}  # table refs 0x8230CC4C
+0x83156A48 = {}  # table refs 0x8230D7D0
+0x831B0A90 = {}  # table refs 0x82310550
+0x833186A8 = {}  # table refs 0x8231F664, 0x8231F6F4
+0x83318528 = {}  # table refs 0x8231F66C
+0x833788C8 = {}  # table refs 0x8232C924
+0x83388A50 = {}  # table refs 0x823308B4, 0x823309B4
+0x82B22768 = {}  # table refs 0x822097D4
+0x82B228A8 = {}  # table refs 0x822097E4
+0x82B64F38 = {}  # table refs 0x8220A6C8, 0x8220A6F0, 0x8220A718
+0x82B64F48 = {}  # table refs 0x8220A6CC, 0x8220A6F4, 0x8220A71C
+0x82E1DE78 = {}  # table refs 0x82283580, 0x82283808, 0x8228AA10
+0x82E1DEA0 = {}  # table refs 0x82283584, 0x8228380C, 0x8228AA14
+0x82EB0598 = {}  # table refs 0x822AF5A4
+0x83138338 = {}  # table refs 0x8230B8B8
+0x83138380 = {}  # table refs 0x8230B8A4
+0x82B22788 = {}  # table refs 0x822097D8
+0x82B227C8 = {}  # table refs 0x822097E0
+0x82EB05B8 = {}  # table refs 0x822AF5A8
+0x83138398 = {}  # table refs 0x8230B8A8
+0x831383E0 = {}  # table refs 0x8230B8B4
+0x82B227A8 = {}  # table refs 0x822097DC
+0x82EB05D8 = {}  # table refs 0x822AF5AC
+0x831383B0 = {}  # table refs 0x8230B8AC
+0x831383C8 = {}  # table refs 0x8230B8B0
+0x82EB05F8 = {}  # table refs 0x822AF5B0
+0x82EB0618 = {}  # table refs 0x822AF5B4
+# Online play (.scratch/online-play/ ticket 06): a Net-Z callback-table thunk
+# (mr r3,r4; mr r4,r5; mr r5,r6; b 0x8308AFE8) whose only reference is the slot
+# 0x822FA0CC, next to the known 0x8308B450 and 0x8308AA78. It follows the throw at
+# 0x8308B41C (bl 0x82C33800), so find_table_targets.py's block-end rule skipped it.
+# Creating a Player Match calls it: "Call to invalid or unregistered function at
+# guest address 0x8308B420".
+0x8308B420 = {}  # table refs 0x822FAFBC
+
+# Enhanced vibration (.scratch/enhanced-vibration/spec.md; evidence in
+# docs/research/controller-vibration.md). Hooks, not seeds: no function is added.
+# Pawn damage function 0x82AE58C0, at its aerial check. 0x82AE63B8-0x82AE63D0
+# call vtable+0x2D0 on the victim and branch to 0x82AE6400 when it returns
+# non-zero, so only hits past the game's own possession check reach 0x82AE63D4
+# (lbz r11,0x18(r29) / cmplwi cr6,r11,4). Live there: r28 victim pawn, r29
+# damage record (+0x18 combat type), r1/r13 the guest stack and thread
+# pointers (since full-coverage vibration the hook adds a rumble-mixer effect
+# and calls no guest function; docs/adr/0017). True (Enhanced) skips the game's
+# aerial call to 0x82AE6400 (lwz r10,0x854(r27)), the next block, which
+# needs no register the skipped code sets.
+[[entrypoint.midasm_hook]]
+address = 0x82AE63D4
+name = "WweHitPulse"
+registers = ["r1", "r13", "fpscr", "r28", "r29"]
+jump_address_on_true = 0x82AE6400
+
+# Full-coverage vibration attacker confirm (.scratch/full-coverage-vibration/,
+# ticket 03), same function, before the possession gate: 0x82AE63B8 (lwz
+# r11,0(r28)) follows bl 0x82ae2b10 and starts the vtable+0x2D0 call whose
+# non-zero result (an AI-possessed victim) branches past 0x82AE63D4 to
+# 0x82AE6400 (bne cr6,0x82ae6400 at 0x82AE63D0). So the WweHitPulse site never
+# sees a hit on the AI's wrestler, the hit a human attacker lands most. r28
+# (victim) and r29 (damage record, +0x18 combat type) are non-volatile and
+# not written between here and 0x82AE63D4. The victim's +0x95C is this hit's
+# attacker (docs/research/controller-vibration.md, ticket 01 section 3).
+# Void: the gate runs as shipped.
+[[entrypoint.midasm_hook]]
+address = 0x82AE63B8
+name = "WweAttackerConfirm"
+registers = ["r1", "r13", "fpscr", "r28", "r29"]
+
+# Critical-health double pulse, same function. 0x82AE6450-0x82AE6460: health on
+# entry (f27, from vtable+0x3DC at 0x82AE58E4) must be above the threshold
+# (lfs f0,0x158(r3) of 0x82AF5908's result) or ble 0x82ae64d4 skips;
+# 0x82AE6464-0x82AE6498: health now (vtable+0x3DC again) must not be above it
+# or bgt 0x82ae64d4 skips. 0x82AE649C (lis r11,-0x7de0) then builds
+# L"SFX_UI_HUD_CRITICAL_01" (0x821FBFC8, addi r4,r11,-0x4038 at 0x82AE64A4) and
+# plays it. So it runs once per crossing. r28 is still the victim pawn (no write
+# after 0x82AE58E0). Void: the sound still plays.
+[[entrypoint.midasm_hook]]
+address = 0x82AE649C
+name = "WweCriticalPulse"
+registers = ["r1", "r13", "fpscr", "r28"]
+
+# Pro vibration mat impacts (.scratch/pro-vibration/spec.md; evidence in
+# docs/research/impact-events.md, section A). PlayGroundEvent 0x82B36048
+# (actor r3, type r4) traces down from the actor and plays the FMOD ground
+# event; its only callers are the AnimNotify_FmodGroundEvent notify's tail call
+# 0x82B361AC (lbz r4,0x34(r3) / lwz r3,0x44(r11) / b 0x82b36048) and PFGEFMOD's
+# 0x82598E58 (after the cast bl 0x82435EC0, clrlwi r4,r11,24). 0x82B36054
+# (lis r10,-0x7dfa) is the first instruction after stwu r1,-0xf0(r1); r3 and
+# r4 are not written before mr r31,r3 / mr r29,r4 at 0x82B360D8/0x82B360E0.
+# Void: the sound still plays.
+[[entrypoint.midasm_hook]]
+address = 0x82B36054
+name = "WweMatImpact"
+registers = ["r1", "r13", "fpscr", "r3", "r4"]
+
+# Full-coverage vibration reversals (.scratch/full-coverage-vibration/, ticket
+# 04; evidence in docs/research/controller-vibration.md, ticket 01 section 4,
+# and docs/research/impact-events.md section F). SETIASC execute 0x8259A850
+# casts the script's pawn (lwz r11,0x34(r4) / lwz r3,0x44(r11) / bl 0x82435EC0
+# at 0x8259A860-0x8259A874), stores the category (stb r11,0x770(r3)) and
+# switches on category-1 through the bdzf chain 0x8259A8A0-0x8259A8B4: the
+# fifth bdzf (r11 = 5, category 6 = eREVERSAL of
+# SD_AnimStateConcreteAttack.EAttackCategories) branches to 0x8259A9DC, which
+# bumps the reversal counter (lwz r11,0x19b0(r3) / +0xBC) read by
+# GetSuccessRate_Reversals. r3 there is the reversing pawn, already cast.
+# Void: the counter still counts.
+[[entrypoint.midasm_hook]]
+address = 0x8259A9DC
+name = "WweReversal"
+registers = ["r1", "r13", "fpscr", "r3"]
+
+# Full-coverage vibration finisher wind-up (.scratch/full-coverage-vibration/,
+# ticket 05; evidence in docs/research/impact-events.md section D). Attack-state
+# enter 0x824E3318 (state r3 -> r23, pawn cast to r29 at 0x824E3348) copies
+# the state's combat type (lbz r8,0x43(r23) / stb r8,0x76d(r29) at
+# 0x824E33A4-0x824E33B0). Type 5 (FINISHER) bumps stat 0x1F (bl 0x82b059c0 at
+# 0x824E33D8) and branches here (b 0x824e33e8); type 15 (EXTREME_SIGNATURE)
+# falls through (cmplwi cr6,r11,0xf / bne 0x824e33f4 at 0x824E33E0). Every
+# other type skips 0x824E33E8 (li r4,0). r23 and r29 are non-volatile; r8 is
+# clobbered by that bl, so the hook reads the type from r23+0x43. Void.
+[[entrypoint.midasm_hook]]
+address = 0x824E33E8
+name = "WweWindUp"
+registers = ["r1", "r13", "fpscr", "r23", "r29"]
+
+# Full-coverage vibration match end (.scratch/full-coverage-vibration/, ticket
+# 06; evidence in docs/research/impact-events.md section E). AttemptMatchEnd
+# 0x82AEA6E8 (manager r3 -> r21, pawn r4 -> r28, win type r5 -> r22) sets the
+# winner r23 = GetTargetPawn(r28, 5), r28's last attacker, in its win cases;
+# failed attempts return 0 at 0x82AEAE18 (li r3,0). 0x82AEAE28 (stw
+# r23,0x130(r21)) is the only path returning 1 (li r3,1 at 0x82AEAE2C): the
+# match is won, r23 the winner, r28 the loser. f31 is stored next
+# (stfs f31,0x134(r21)); the hook restores its side call's fpscr. Void.
+[[entrypoint.midasm_hook]]
+address = 0x82AEAE28
+name = "WweMatchEnd"
+registers = ["r1", "r13", "fpscr", "r23", "r28"]
+
+# Full-coverage vibration camera-shake impacts (.scratch/full-coverage-vibration/,
+# ticket 07; evidence in docs/research/impact-events.md section B). 0x825A5008
+# is SETSCSK's execute ("Creates a Camera Screen Shake", vtable 0x82076EC0):
+# r3 the event (+0x10 size, read as a float at 0x825A524C-0x825A526C), r4 the
+# script node; like its sibling executes (PFGEFMOD 0x82598E30: lwz
+# r11,0x34(r4) / lwz r3,0x44(r11) / bl 0x82435EC0) the actor is r4+0x34 ->
+# +0x44, cast before use. 0x825A5020 (lis r11,-0x7c8e) is the first
+# instruction after the prologue's stwu r1,-0x120(r1), before mr r29,r3; r3
+# and r4 are still the arguments. Void: the shake still plays.
+[[entrypoint.midasm_hook]]
+address = 0x825A5020
+name = "WweCameraShake"
+registers = ["r1", "r13", "fpscr", "r3", "r4"]
+
+# Low-end preset GPU-wait back-off (.scratch/low-end-preset/, ticket 11; evidence in
+# docs/research/spin-loops.md section 2). D3D's six GPU-wait loops each call 0x82DB90A0
+# (begin: stw r4,0(r3) device, stw r5,4(r3) reason, read pointer, time), then loop
+# { addi r3,r1,<record>; bl 0x82db91b0; cmpwi r3,0; beq <exit>; <test>; branch back to
+# the addi }, then bl 0x82db90d0 (end). 0x82DB91B0 is the spin step (32 priority-hint
+# no-ops, the 0x2ABD lost bit, a 5000 ms hang check) and is never hooked. Each hook
+# site is the cmpwi r3,0 right after its bl 0x82db91b0; no branch targets it (each
+# loop branches back to its addi). Void, no registers: the hook only waits on the host;
+# r3 and the loop's test run as shipped.
+# 0x82DB7058: ring space, loop 0x82DB70A8-0x82DB70DC (read pointer +4 of device+0x2A90).
+[[entrypoint.midasm_hook]]
+address = 0x82DB70B0
+name = "WweGpuWaitBackoff"
+
+# 0x82DB70F0: a ring position, loop 0x82DB714C-0x82DB717C (+0x3C of device+0x2A90).
+[[entrypoint.midasm_hook]]
+address = 0x82DB7154
+name = "WweGpuWaitBackoff"
+
+# 0x82DB77A0: read pointer against device+0x2A9C, loop 0x82DB7830-0x82DB7858.
+[[entrypoint.midasm_hook]]
+address = 0x82DB7838
+name = "WweGpuWaitBackoff"
+
+# 0x82DBDFF8: device+0x4188 - device+0x4190 below 15, loop 0x82DBE618-0x82DBE638.
+[[entrypoint.midasm_hook]]
+address = 0x82DBE620
+name = "WweGpuWaitBackoff"
+
+# 0x82DC46E8: a fence value at *(entry+0x10) reaching r30, loop 0x82DC4748-0x82DC4764.
+[[entrypoint.midasm_hook]]
+address = 0x82DC4750
+name = "WweGpuWaitBackoff"
+
+# 0x82DC4D00: the same for the entries at device+0x2C48, loop 0x82DC4E64-0x82DC4E80.
+[[entrypoint.midasm_hook]]
+address = 0x82DC4E6C
+name = "WweGpuWaitBackoff"
+
+# Online spike trace hooks (.scratch/online-spike/, ticket 02): log-only, after the
+# `mflr r12` that opens each function (all 16 checked with scripts/disasm.py), so r12
+# is the caller's return address. Quazal login 0x82C27BD0 (reads [Quazal], calls
+# 0x830EBEB8 at 0x82C27DD8 with service ID 0x545107FD), 0x830EBC88 (calls the
+# JobLSPLogin constructor 0x830EC9F8 at 0x830EBDE8), the login steps from the
+# research's step-pointer table, Net-Z XNet init 0x83079248 and its release
+# 0x830791E0 (called at 0x830C4CBC in 0x830C4CB0), SyncSim 0x82A617D8 and the UE3
+# XSession paths. src/online_trace_hooks.cpp; silent unless --wwe_net_trace.
+[[entrypoint.midasm_hook]]
+address = 0x82C27BD0
+name = "WweOnlineTrace_82C27BD0"
+registers = ["r3", "r4", "r5", "r6", "r12"]
+after_instruction = true
+
+[[entrypoint.midasm_hook]]
+address = 0x830EBEB8
+name = "WweOnlineTrace_830EBEB8"
+registers = ["r3", "r4", "r5", "r6", "r12"]
+after_instruction = true
+
+[[entrypoint.midasm_hook]]
+address = 0x830EBC88
+name = "WweOnlineTrace_830EBC88"
+registers = ["r3", "r4", "r5", "r6", "r12"]
+after_instruction = true
+
+[[entrypoint.midasm_hook]]
+address = 0x830EC9F8
+name = "WweOnlineTrace_830EC9F8"
+registers = ["r3", "r4", "r5", "r6", "r12"]
+after_instruction = true
+
+[[entrypoint.midasm_hook]]
+address = 0x830EC910
+name = "WweOnlineTrace_830EC910"
+registers = ["r3", "r4", "r5", "r6", "r12"]
+after_instruction = true
+
+[[entrypoint.midasm_hook]]
+address = 0x830EC760
+name = "WweOnlineTrace_830EC760"
+registers = ["r3", "r4", "r5", "r6", "r12"]
+after_instruction = true
+
+[[entrypoint.midasm_hook]]
+address = 0x830EC638
+name = "WweOnlineTrace_830EC638"
+registers = ["r3", "r4", "r5", "r6", "r12"]
+after_instruction = true
+
+[[entrypoint.midasm_hook]]
+address = 0x830EC4B8
+name = "WweOnlineTrace_830EC4B8"
+registers = ["r3", "r4", "r5", "r6", "r12"]
+after_instruction = true
+
+[[entrypoint.midasm_hook]]
+address = 0x830EC1E8
+name = "WweOnlineTrace_830EC1E8"
+registers = ["r3", "r4", "r5", "r6", "r12"]
+after_instruction = true
+
+[[entrypoint.midasm_hook]]
+address = 0x83079248
+name = "WweOnlineTrace_83079248"
+registers = ["r3", "r4", "r5", "r6", "r12"]
+after_instruction = true
+
+[[entrypoint.midasm_hook]]
+address = 0x830791E0
+name = "WweOnlineTrace_830791E0"
+registers = ["r3", "r4", "r5", "r6", "r12"]
+after_instruction = true
+
+[[entrypoint.midasm_hook]]
+address = 0x830C4CB0
+name = "WweOnlineTrace_830C4CB0"
+registers = ["r3", "r4", "r5", "r6", "r12"]
+after_instruction = true
+
+[[entrypoint.midasm_hook]]
+address = 0x82A617D8
+name = "WweOnlineTrace_82A617D8"
+registers = ["r3", "r4", "r5", "r6", "r12"]
+after_instruction = true
+
+[[entrypoint.midasm_hook]]
+address = 0x829DEC40
+name = "WweOnlineTrace_829DEC40"
+registers = ["r3", "r4", "r5", "r6", "r12"]
+after_instruction = true
+
+[[entrypoint.midasm_hook]]
+address = 0x829DF460
+name = "WweOnlineTrace_829DF460"
+registers = ["r3", "r4", "r5", "r6", "r12"]
+after_instruction = true
+
+[[entrypoint.midasm_hook]]
+address = 0x829E1020
+name = "WweOnlineTrace_829E1020"
+registers = ["r3", "r4", "r5", "r6", "r12"]
+after_instruction = true

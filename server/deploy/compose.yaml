@@ -1,0 +1,42 @@
+# The game server on the VPS (ticket 14), deployed to /opt/allstars by
+# scripts/deploy-server.ps1. Rendez-Vous UDP is published on the VPS address; the XWS
+# HTTP API only on loopback, for the host nginx (allstars.komplexaci.cz).
+name: allstars
+services:
+  server:
+    build: ./server
+    image: allstars-server:local
+    restart: unless-stopped
+    mem_limit: 256m
+    read_only: true
+    tmpfs:
+      - /home/nonroot:uid=65532,gid=65532,size=16m
+    volumes:
+      # Uploaded over SSH by the deploy script; owned by the image's nonroot user.
+      - ./allstars-server.json:/config/allstars-server.json:ro
+    ports:
+      - "46.36.38.4:32480:32480/udp"
+      - "46.36.38.4:32481:32481/udp"
+      # The relay (ticket 16).
+      - "46.36.38.4:32482:32482/udp"
+      - "127.0.0.1:36000:36000"
+    healthcheck:
+      test: ["CMD", "/allstars-server", "health", "-config", "/config/allstars-server.json"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks: [allstars]
+
+networks:
+  allstars:
+    ipam:
+      config:
+        # Fixed so the config can trust the gateway, where nginx's requests come from.
+        - subnet: 172.29.48.0/24
+          gateway: 172.29.48.1

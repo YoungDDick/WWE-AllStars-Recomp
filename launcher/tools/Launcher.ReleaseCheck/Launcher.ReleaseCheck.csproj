@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    The packaging check scripts/package.ps1 runs on the staged release folder: fails when a
+    game-derived file is staged or a file the player needs is missing (Launcher.Core's ReleaseCheck).
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>WweAllStars.Launcher.ReleaseCheck</RootNamespace>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Launcher.Core/Launcher.Core.csproj" />
+  </ItemGroup>
+</Project>

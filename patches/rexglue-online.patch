@@ -1,0 +1,4933 @@
+diff --git a/include/rex/kernel/xam/live/addressing.h b/include/rex/kernel/xam/live/addressing.h
+new file mode 100644
+index 0000000..b3a5ae6
+--- /dev/null
++++ b/include/rex/kernel/xam/live/addressing.h
+@@ -0,0 +1,66 @@
++/**
++ * @file        addressing.h
++ * @brief       Which address a copy binds and which address it reaches a peer at.
++ *
++ * Like an Xbox's XNADDR, a player has a local address (ina, on its own network) and a
++ * public one (inaOnline, what the game server sees). Peers behind one router share the
++ * public address, so they reach each other locally. Addresses are IPv4 in host order.
++ */
++
++#pragma once
++
++#include <cstdint>
++
++namespace rex::kernel::xam::live {
++
++// The game's peer ports: VDP 1000 (Net-Z) and UDP 9100.
++constexpr uint16_t kPeerPorts[] = {1000, 9100};
++
++constexpr bool IsPeerPort(uint16_t port) {
++  for (const uint16_t peer_port : kPeerPorts) {
++    if (port == peer_port) {
++      return true;
++    }
++  }
++  return false;
++}
++
++constexpr bool IsLoopback(uint32_t address) {
++  return (address >> 24) == 127;
++}
++
++// The address to send to a peer with these XNADDR addresses, from a copy whose public
++// address is `own_public`.
++constexpr uint32_t PeerAddress(uint32_t peer_local, uint32_t peer_public, uint32_t own_public) {
++  if (peer_local && (!peer_public || peer_public == own_public)) {
++    return peer_local;
++  }
++  return peer_public;
++}
++
++struct BindTarget {
++  uint32_t address = 0;
++  uint16_t port = 0;
++};
++
++// A guest bind of `address:port` on a copy with --wwe_online_ip `copy_address` (0 when
++// unset). Each copy on one PC keeps the peer ports on its own address. Its other sockets
++// (the Rendez-Vous client's fixed 1001) take any port on the default route: that port
++// would collide between copies, and a loopback address cannot reach the internet.
++constexpr BindTarget PlanBind(uint32_t address, uint16_t port, uint32_t copy_address) {
++  if (address != 0 || copy_address == 0) {
++    return {address, port};
++  }
++  if (IsPeerPort(port)) {
++    return {copy_address, port};
++  }
++  return {0, 0};
++}
++
++// The address an unbound socket sending to `destination` binds to first (0: none), so a
++// peer on the same PC sees the copy's own address.
++constexpr uint32_t ImplicitBindAddress(uint32_t destination, uint32_t copy_address) {
++  return IsLoopback(destination) ? copy_address : 0;
++}
++
++}  // namespace rex::kernel::xam::live
+diff --git a/include/rex/kernel/xam/live/http.h b/include/rex/kernel/xam/live/http.h
+new file mode 100644
+index 0000000..c1c181f
+--- /dev/null
++++ b/include/rex/kernel/xam/live/http.h
+@@ -0,0 +1,26 @@
++/**
++ * @file        http.h
++ * @brief       The online client's HTTP requests (libcurl).
++ *
++ * After the Xenia netplay fork's XLiveAPI::Get/Post/Delete (src/xenia/kernel/XLiveAPI.cpp,
++ * Copyright 2026 Xenia Canary, BSD license).
++ */
++
++#pragma once
++
++#include <string>
++
++namespace rex::kernel::xam::live {
++
++struct HttpResponse {
++  long status = 0;  // 0 when the request failed
++  std::string body;
++  std::string local_ip;  // the address the request left from
++};
++
++// `method` GET, POST or DELETE; `body` is sent as JSON. Requests take the default route
++// (a loopback --wwe_online_ip cannot reach a server on the internet).
++HttpResponse HttpRequest(const std::string& method, const std::string& url,
++                         const std::string& body = {});
++
++}  // namespace rex::kernel::xam::live
+diff --git a/include/rex/kernel/xam/live/identity.h b/include/rex/kernel/xam/live/identity.h
+new file mode 100644
+index 0000000..1fa183e
+--- /dev/null
++++ b/include/rex/kernel/xam/live/identity.h
+@@ -0,0 +1,44 @@
++/**
++ * @file        identity.h
++ * @brief       The install's online identity: a random online XUID and MAC address.
++ *
++ * WWE All Stars recomp, online play (.scratch/online-play/). Every copy of the game used
++ * to be XUID 0xB13EBABEBABEBABE with MAC CC:CC:CC:CC:CC:CC, so two copies were one player.
++ * The first online start writes online-identity.json to the user data folder.
++ */
++
++#pragma once
++
++#include <array>
++#include <cstdint>
++#include <filesystem>
++#include <optional>
++#include <random>
++#include <string>
++#include <string_view>
++
++namespace rex::kernel::xam::live {
++
++struct OnlineIdentity {
++  uint64_t xuid = 0;
++  std::array<uint8_t, 6> mac = {};
++};
++
++inline constexpr const char* kIdentityFileName = "online-identity.json";
++
++// An online XUID (0x0009 followed by 48 random bits) and a random locally administered,
++// unicast MAC.
++OnlineIdentity NewIdentity(std::mt19937_64& random);
++
++std::string SerializeIdentity(const OnlineIdentity& identity);
++std::optional<OnlineIdentity> ParseIdentity(std::string_view json);
++
++// The identity in `folder`, written there first when it is missing or unreadable.
++OnlineIdentity LoadOrCreateIdentity(const std::filesystem::path& folder,
++                                    std::mt19937_64& random);
++
++// "02aabbcc0a01", as XWS stores MAC addresses.
++std::string MacText(const std::array<uint8_t, 6>& mac);
++std::optional<std::array<uint8_t, 6>> ParseMac(std::string_view text);
++
++}  // namespace rex::kernel::xam::live
+diff --git a/include/rex/kernel/xam/live/live.h b/include/rex/kernel/xam/live/live.h
+new file mode 100644
+index 0000000..d48578d
+--- /dev/null
++++ b/include/rex/kernel/xam/live/live.h
+@@ -0,0 +1,69 @@
++/**
++ * @file        live.h
++ * @brief       --wwe_online: Xbox LIVE sign-in against the game server.
++ *
++ * WWE All Stars recomp, online play (.scratch/online-play/, ADR-0021). With --wwe_online
++ * the profile signs in to Live, registers with the game server's XWS API (whoami,
++ * players) and lists the server's Rendez-Vous address as the title's LSP. The client
++ * follows the Xenia netplay fork (AdrianCassar/xenia-canary, 6dbaa1f, BSD license).
++ * Off by default; off, nothing here runs.
++ */
++
++#pragma once
++
++#include <array>
++#include <cstdint>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include <rex/cvar.h>
++#include <rex/kernel/xam/live/xlive_json.h>
++
++REXCVAR_DECLARE(bool, wwe_online);
++REXCVAR_DECLARE(std::string, wwe_online_server);
++REXCVAR_DECLARE(std::string, wwe_online_ip);
++REXCVAR_DECLARE(std::string, wwe_online_name);
++
++namespace rex::kernel::xam::live {
++
++// --wwe_online.
++bool Enabled();
++
++// Enabled, and the game server answered: the profile is signed in to Live. The first call
++// loads the identity and registers with the server.
++bool SignedIn();
++
++// The install's online XUID and MAC (online-identity.json).
++uint64_t OnlineXuid();
++std::array<uint8_t, 6> Mac();
++
++// --wwe_online_name, or the profile's gamertag.
++std::string Gamertag();
++
++// --wwe_online_ip in host order: the copy's peer sockets bind to it (PlanBind). 0 when
++// unset.
++uint32_t BindAddress();
++
++// The address the server sees this copy at (whoami, XNADDR inaOnline), host order; 0
++// before sign-in.
++uint32_t OnlineAddress();
++
++// This copy's address on its own network (XNADDR ina): --wwe_online_ip, else the address
++// its requests to the server leave from. 0 before sign-in.
++uint32_t LocalAddress();
++
++// The game server's LSP list (title/{id}/servers).
++std::vector<TitleServer> TitleServers();
++
++// The player the server has at an address, public or local (players/find).
++std::optional<PlayerRecord> FindPlayer(uint32_t address);
++// The player with an XNADDR's MAC (abEnet), or with a XUID.
++std::optional<PlayerRecord> FindPlayerByMac(const std::array<uint8_t, 6>& mac);
++std::optional<PlayerRecord> FindPlayerByXuid(uint64_t xuid);
++
++// A hosted session's QoS data (XNetQosListen), for searchers' XNetQosLookup.
++void PostQosData(uint64_t session_id, const std::string& data);
++std::string GetQosData(uint64_t session_id);
++
++}  // namespace rex::kernel::xam::live
+diff --git a/include/rex/kernel/xam/live/port_map.h b/include/rex/kernel/xam/live/port_map.h
+new file mode 100644
+index 0000000..6e14b8f
+--- /dev/null
++++ b/include/rex/kernel/xam/live/port_map.h
+@@ -0,0 +1,69 @@
++/**
++ * @file        port_map.h
++ * @brief       UPnP port mappings (ticket 18): a player's game ports and the router's
++ *              external ports they are reached at.
++ *
++ * A player with --wwe_online_upnp registers its mappings; a peer reaching it at its
++ * public address sends to the external ports, and datagrams from those ports reach the
++ * game from the game's own ports.
++ */
++
++#pragma once
++
++#include <cstdint>
++#include <map>
++#include <mutex>
++
++namespace rex::kernel::xam::live {
++
++// Game port -> the router's external port.
++using PortMap = std::map<uint16_t, uint16_t>;
++
++inline uint16_t ExternalPort(const PortMap& ports, uint16_t game_port) {
++  const auto found = ports.find(game_port);
++  return found == ports.end() ? game_port : found->second;
++}
++
++inline uint16_t GamePort(const PortMap& ports, uint16_t external_port) {
++  for (const auto& [game, external] : ports) {
++    if (external == external_port) {
++      return game;
++    }
++  }
++  return external_port;
++}
++
++// The external port to ask the router for: the game port itself, then a thousand higher
++// for each attempt the router refused (another device holds the port).
++constexpr uint16_t CandidateExternalPort(uint16_t game_port, int attempt) {
++  return uint16_t(game_port + 1000 * attempt);
++}
++
++// The peers reached at their public address, with their mappings.
++class PeerPorts {
++ public:
++  void Remember(uint32_t address, const PortMap& ports) {
++    std::lock_guard lock(mutex_);
++    if (ports.empty()) {
++      by_address_.erase(address);
++    } else {
++      by_address_[address] = ports;
++    }
++  }
++  uint16_t External(uint32_t address, uint16_t game_port) const {
++    std::lock_guard lock(mutex_);
++    const auto found = by_address_.find(address);
++    return found == by_address_.end() ? game_port : ExternalPort(found->second, game_port);
++  }
++  uint16_t Game(uint32_t address, uint16_t external_port) const {
++    std::lock_guard lock(mutex_);
++    const auto found = by_address_.find(address);
++    return found == by_address_.end() ? external_port : GamePort(found->second, external_port);
++  }
++
++ private:
++  mutable std::mutex mutex_;
++  std::map<uint32_t, PortMap> by_address_;
++};
++
++}  // namespace rex::kernel::xam::live
+diff --git a/include/rex/kernel/xam/live/relay.h b/include/rex/kernel/xam/live/relay.h
+new file mode 100644
+index 0000000..81a85ea
+--- /dev/null
++++ b/include/rex/kernel/xam/live/relay.h
+@@ -0,0 +1,54 @@
++/**
++ * @file        relay.h
++ * @brief       The peer transport through the game server's relay (ticket 16).
++ *
++ * A relayed peer is reached at a stand-in loopback address (relay_protocol.h). The
++ * transport listens there on the game's peer ports (VDP 1000, UDP 9100): what the game
++ * sends to a stand-in goes to the relay wrapped for that peer, and what the relay delivers
++ * from a peer reaches the game from the peer's stand-in address and port. The game sees no
++ * difference.
++ *
++ * Without --wwe_online_force_relay a peer is probed directly first (ticket 17): it is
++ * reached directly when it answers, through the relay otherwise.
++ */
++
++#pragma once
++
++#include <cstdint>
++#include <optional>
++
++#include <rex/cvar.h>
++#include <rex/kernel/xam/live/relay_protocol.h>
++
++REXCVAR_DECLARE(bool, wwe_online_force_relay);
++REXCVAR_DECLARE(bool, wwe_online_drop_direct);
++
++namespace rex::kernel::xam::live::relay {
++
++// --wwe_online_force_relay: every peer goes through the relay.
++bool Forced();
++
++// Answers direct probes on the probe port at --wwe_online_ip (0: every address), from
++// before registration on: the server checks a UPnP player's mapped probe port then.
++void ListenForProbes(uint32_t copy_address);
++
++// After sign-in: the relay's address and port, this player's XUID and token, and
++// --wwe_online_ip (0 when unset), where the game's peer sockets listen. Starts the
++// transport.
++void Configure(uint32_t relay_address, uint16_t relay_port, uint64_t own_xuid,
++               const Token& token, uint32_t copy_address);
++bool Configured();
++
++// The address the game reaches a peer at: `direct` once the peer answered a direct probe,
++// else its stand-in address (listening once this returns). The first call for a peer
++// probes it, waiting up to about 0.6 s; the choice is logged and kept for the session.
++uint32_t AddressFor(uint64_t peer_xuid, uint32_t direct);
++
++// --wwe_online_drop_direct (developer): a datagram to a peer port that is not a stand-in
++// address is dropped, and probes go unanswered, as if the peers could not reach each other.
++bool DropsDirect(uint32_t address, uint16_t port);
++
++// The peer behind a stand-in address.
++std::optional<uint64_t> PeerAt(uint32_t address);
++
++}  // namespace rex::kernel::xam::live::relay
+diff --git a/include/rex/kernel/xam/live/relay_protocol.h b/include/rex/kernel/xam/live/relay_protocol.h
+new file mode 100644
+index 0000000..96a627e
+--- /dev/null
++++ b/include/rex/kernel/xam/live/relay_protocol.h
+@@ -0,0 +1,87 @@
++/**
++ * @file        relay_protocol.h
++ * @brief       The game server's relay: its wire format, the stand-in addresses of
++ *              relayed peers, and each peer's route (direct or relayed).
++ *
++ * The wire format is server/internal/relay's (see there): "ASR1", a type byte, then
++ * big-endian fields. A relayed peer is reached at a stand-in loopback address, as a real
++ * Xbox hands out a secure address per peer; the transport (relay.h) listens there.
++ */
++
++#pragma once
++
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <functional>
++#include <map>
++#include <optional>
++#include <string_view>
++#include <vector>
++
++namespace rex::kernel::xam::live::relay {
++
++using Token = std::array<uint8_t, 16>;
++
++// The registration's relayToken (32 hex digits).
++std::optional<Token> ParseToken(std::string_view hex);
++
++std::vector<uint8_t> Hello(uint64_t xuid, const Token& token);
++std::vector<uint8_t> Ping(uint64_t stamp);
++// A game datagram for player `to`, from the game's port `src` to its port `dst`.
++std::vector<uint8_t> Send(uint64_t to, uint16_t src, uint16_t dst, const uint8_t* payload,
++                          size_t size);
++
++// What the relay sends a player.
++struct Message {
++  enum Kind { kWelcome, kPong, kDeliver } kind;
++  uint64_t value = 0;  // welcome: own XUID; pong: the ping's stamp; deliver: the sender
++  uint16_t src_port = 0;
++  uint16_t dst_port = 0;
++  const uint8_t* payload = nullptr;  // into the parsed buffer
++  size_t size = 0;
++};
++std::optional<Message> Parse(const uint8_t* data, size_t size);
++
++// 127.200.0.1: the first stand-in address.
++constexpr uint32_t kFirstStandIn = 0x7FC80001;
++
++// Relayed peers and their stand-in addresses.
++class PeerTable {
++ public:
++  // The peer's stand-in address: the one it has, else the first free candidate `usable`
++  // accepts (the transport binds there; another copy on this PC may hold it).
++  std::optional<uint32_t> Add(uint64_t xuid, const std::function<bool(uint32_t)>& usable);
++  std::optional<uint64_t> XuidAt(uint32_t stand_in) const;
++  std::optional<uint32_t> StandInFor(uint64_t xuid) const;
++
++ private:
++  std::map<uint64_t, uint32_t> by_xuid_;
++  std::map<uint32_t, uint64_t> by_address_;
++};
++
++// The direct probe (ticket 17): a copy asks a peer's probe port whether it can reach the
++// peer at all; "ASP1", a type byte, the nonce. The answer echoes the nonce.
++constexpr uint16_t kProbePort = 9101;
++std::vector<uint8_t> Probe(uint64_t nonce);
++std::vector<uint8_t> ProbeAnswer(uint64_t nonce);
++std::optional<uint64_t> ParseProbe(const uint8_t* data, size_t size);
++std::optional<uint64_t> ParseProbeAnswer(const uint8_t* data, size_t size);
++
++enum class Route { kUndecided, kDirect, kRelay };
++
++// Each peer's route for the session: a probe settles it, and it stays put after.
++class RouteTable {
++ public:
++  Route Get(uint64_t xuid) const;
++  // The probe was answered or timed out; returns the peer's route.
++  Route Settle(uint64_t xuid, bool answered);
++  // The relay delivered from this peer: an undecided peer is settled on the relay, so both
++  // sides of a pair agree.
++  void Relayed(uint64_t xuid);
++
++ private:
++  std::map<uint64_t, Route> routes_;
++};
++
++}  // namespace rex::kernel::xam::live::relay
+diff --git a/include/rex/kernel/xam/live/session_data.h b/include/rex/kernel/xam/live/session_data.h
+new file mode 100644
+index 0000000..5eee420
+--- /dev/null
++++ b/include/rex/kernel/xam/live/session_data.h
+@@ -0,0 +1,93 @@
++/**
++ * @file        session_data.h
++ * @brief       Xbox LIVE session data: contexts, properties, the server's session records,
++ *              and search results in guest memory.
++ *
++ * After the Xenia netplay fork's XSession and XLiveAPI session calls
++ * (src/xenia/kernel/xsession.cc, XLiveAPI.cpp; Copyright 2026 Xenia Canary, BSD license).
++ * Properties travel as JSON objects ({id, type, bytes}) rather than the fork's host-endian
++ * binary blobs; server/internal/xws stores them as given.
++ */
++
++#pragma once
++
++#include <array>
++#include <cstdint>
++#include <string>
++#include <string_view>
++#include <vector>
++
++namespace rex::kernel::xam::live {
++
++// XUSER_DATA types; a property ID carries its type in the top nibble.
++inline constexpr uint8_t kUserDataContext = 0;
++inline constexpr uint8_t kUserDataInt32 = 1;
++inline constexpr uint8_t kUserDataInt64 = 2;
++inline constexpr uint8_t kUserDataDouble = 3;
++inline constexpr uint8_t kUserDataWString = 4;
++inline constexpr uint8_t kUserDataFloat = 5;
++inline constexpr uint8_t kUserDataBinary = 6;
++inline constexpr uint8_t kUserDataDateTime = 7;
++
++struct UserContext {
++  uint32_t id = 0;
++  uint32_t value = 0;
++  bool operator==(const UserContext&) const = default;
++};
++
++// A property value as the guest set it: big-endian numbers, UTF-16BE text with its
++// terminator, raw bytes. It travels base64-encoded ("bytes"); ParseSessions also reads
++// "int" and "double" values.
++struct UserProperty {
++  uint32_t id = 0;
++  uint8_t type = 0;
++  std::vector<uint8_t> value;
++};
++
++// XGIUserSetPropertyEx's value (`size` bytes at `data`) for property `id`.
++UserProperty GuestProperty(uint32_t id, const uint8_t* data, uint32_t size);
++
++struct SessionRecord {
++  uint64_t session_id = 0;
++  uint64_t host_xuid = 0;
++  uint32_t flags = 0;
++  uint32_t public_slots = 0;
++  uint32_t private_slots = 0;
++  uint32_t open_public = 0;
++  uint32_t open_private = 0;
++  uint32_t filled_public = 0;
++  uint32_t filled_private = 0;
++  std::string host_address;   // public
++  std::string local_address;  // on the host's own network; empty: the public one
++  std::array<uint8_t, 6> mac = {};
++  uint16_t port = 0;
++  std::string build_id;
++  std::vector<UserContext> contexts;
++  std::vector<UserProperty> properties;
++};
++
++// POST title/{id}/sessions.
++std::string SessionJson(const SessionRecord& session, uint32_t user_index);
++// POST title/{id}/sessions/{id}/properties.
++std::string PropertiesJson(const std::vector<UserContext>& contexts,
++                           const std::vector<UserProperty>& properties);
++// POST title/{id}/sessions/search.
++std::string SearchJson(uint32_t search_index, uint32_t results, uint32_t users,
++                       uint64_t searcher_xuid, const std::string& build_id,
++                       const std::vector<UserContext>& contexts);
++// A search reply (an array) or one session (an object).
++std::vector<SessionRecord> ParseSessions(std::string_view body);
++
++// XSESSION_SEARCHRESULT_HEADER, the XSESSION_SEARCHRESULTs, then their contexts, properties
++// and property data, as the guest buffer at `guest_base` (big-endian, at most
++// `buffer_size` bytes). Sessions that don't fit are left out.
++std::vector<uint8_t> PackSearchResults(const std::vector<SessionRecord>& sessions,
++                                       uint32_t guest_base, uint32_t buffer_size);
++
++// XSESSION_INFO (0x3C bytes): the session ID, the host's XNADDR (local address in ina,
++// public in inaOnline) and the key-exchange key.
++void WriteSessionInfo(uint8_t* out, uint64_t session_id, uint32_t local_address,
++                      uint32_t public_address, const std::array<uint8_t, 6>& mac,
++                      uint16_t port);
++
++}  // namespace rex::kernel::xam::live
+diff --git a/include/rex/kernel/xam/live/upnp.h b/include/rex/kernel/xam/live/upnp.h
+new file mode 100644
+index 0000000..0ee11a4
+--- /dev/null
++++ b/include/rex/kernel/xam/live/upnp.h
+@@ -0,0 +1,33 @@
++/**
++ * @file        upnp.h
++ * @brief       --wwe_online_upnp: the game's peer ports mapped on the router (ticket 18).
++ *
++ * After the Xenia netplay fork's UPnP class (src/xenia/kernel/upnp.cc, Copyright 2026
++ * Xenia Canary, BSD license), with miniupnpc at the fork's pinned commit. Off by default:
++ * without the switch no UPnP traffic is sent.
++ */
++
++#pragma once
++
++#include <rex/cvar.h>
++#include <rex/kernel/xam/live/port_map.h>
++
++REXCVAR_DECLARE(bool, wwe_online_upnp);
++
++namespace rex::kernel::xam::live::upnp {
++
++bool Enabled();
++
++// The first call (with the switch on) finds the router and maps UDP 1000, 9100 and the
++// probe port to this PC, keeping the leases fresh. Game port -> external port; empty when
++// the switch is off or no router answered.
++PortMap MapPorts();
++
++// Removes the mappings; the window's close runs it before the process ends.
++void RemoveMappings();
++
++// Peers reached at their public address and the router ports they mapped, for the
++// datagrams to and from them.
++PeerPorts& Peers();
++
++}  // namespace rex::kernel::xam::live::upnp
+diff --git a/include/rex/kernel/xam/live/xlive_json.h b/include/rex/kernel/xam/live/xlive_json.h
+new file mode 100644
+index 0000000..b5789dd
+--- /dev/null
++++ b/include/rex/kernel/xam/live/xlive_json.h
+@@ -0,0 +1,73 @@
++/**
++ * @file        xlive_json.h
++ * @brief       The JSON the online client exchanges with the game server's XWS API.
++ *
++ * Shapes follow the Xenia netplay fork (AdrianCassar/xenia-canary,
++ * netplay_canary_experimental 6dbaa1f, src/xenia/kernel/json/), BSD-licensed; the server
++ * side is server/internal/xws.
++ */
++
++#pragma once
++
++#include <array>
++#include <cstdint>
++#include <optional>
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include <rex/kernel/xam/live/port_map.h>
++
++namespace rex::kernel::xam::live {
++
++// --wwe_online_server as the API's base URL: "host" and "host:port" get http:// (port
++// 36000 by default), a URL is kept; always one trailing slash.
++std::string ApiBaseUrl(std::string_view server);
++
++// GET whoami: the address the server sees this copy at.
++std::optional<std::string> ParseWhoami(std::string_view body);
++
++struct PlayerRecord {
++  uint64_t xuid = 0;
++  uint64_t machine_id = 0;
++  std::string host_address;   // public: the address whoami gave
++  std::string local_address;  // on its own network (XNADDR ina)
++  std::string gamertag;
++  std::array<uint8_t, 6> mac = {};
++  std::string build_id;  // see BuildId(); sent, never parsed
++  PortMap mapped_ports;  // --wwe_online_upnp: game port -> the router's external port
++};
++
++// The game the port is built on (WWE All Stars Recomp 1.0.0: Title Update 2), sent at sign-in;
++// a game server for another version refuses the player (tu2-dlc ticket 06).
++inline constexpr const char* kGameVersion = "tu2";
++
++// The POST players reply: the relay's "address:port" and this player's token for it, and,
++// for a player with mapped ports, whether the server reached the mapped probe port.
++struct Registration {
++  std::string relay_address;
++  std::string relay_token;
++  std::optional<bool> reachable;
++};
++std::optional<Registration> ParseRegistration(std::string_view body);
++
++// The message of a refused sign-in (HTTP 426: the server runs another game version).
++std::optional<std::string> ParseRefusal(std::string_view body);
++
++// POST players body, and the players/find reply.
++std::string PlayerJson(const PlayerRecord& player);
++std::optional<PlayerRecord> ParsePlayer(std::string_view body);
++
++struct TitleServer {
++  uint32_t address = 0;  // host order
++  uint32_t flags = 0;
++  std::string description;
++};
++
++// GET title/{id}/servers: the LSP servers XTitleServerCreateEnumerator lists.
++std::vector<TitleServer> ParseTitleServers(std::string_view body);
++
++// "a.b.c.d" in host order, or nullopt.
++std::optional<uint32_t> ParseIPv4(std::string_view text);
++
++}  // namespace rex::kernel::xam::live
+diff --git a/include/rex/kernel/xam/live/xsession.h b/include/rex/kernel/xam/live/xsession.h
+new file mode 100644
+index 0000000..b38cbc7
+--- /dev/null
++++ b/include/rex/kernel/xam/live/xsession.h
+@@ -0,0 +1,96 @@
++/**
++ * @file        xsession.h
++ * @brief       Xbox LIVE sessions (XSession*) against the game server's XWS API.
++ *
++ * WWE All Stars recomp, online play. Ported in part from the Xenia netplay fork's XSession
++ * (src/xenia/kernel/xsession.cc, Copyright 2026 Xenia Canary, BSD license): Player Match
++ * hosting, search, details, modify, delete, join and leave. No arbitration, stats or
++ * migration. Only used with --wwe_online; otherwise the session messages keep their stubs.
++ */
++
++#pragma once
++
++#include <array>
++#include <cstdint>
++#include <map>
++#include <mutex>
++#include <string>
++#include <vector>
++
++#include <rex/kernel/xam/live/session_data.h>
++#include <rex/system/xobject.h>
++#include <rex/system/xtypes.h>
++
++namespace rex::kernel::xam::live {
++
++// The contexts and properties the game sets for a user (XGIUserSetContextEx and
++// XGIUserSetPropertyEx); a hosted session advertises them.
++void SetUserContext(uint32_t user_index, uint32_t id, uint32_t value);
++void SetUserProperty(uint32_t user_index, const UserProperty& property);
++std::vector<UserContext> UserContexts(uint32_t user_index);
++std::vector<UserProperty> UserProperties(uint32_t user_index);
++
++// The SHA-256 of the running executable (hex): only copies of the same build see each
++// other's sessions. Computed once.
++const std::string& BuildId();
++
++class XSession : public system::XObject {
++ public:
++  static const Type kObjectType = Type::Session;
++
++  explicit XSession(system::KernelState* kernel_state);
++
++  // The guest object: 4 bytes holding the handle (as XAM's).
++  X_STATUS Initialize();
++
++  struct Member {
++    uint64_t xuid = 0;
++    uint32_t user_index = 0xFE;  // XUserIndexNone
++    bool is_private = false;
++    bool local = false;
++  };
++
++  // Guards everything below: XGI messages for one session come from several threads.
++  std::mutex mutex;
++  bool created = false;
++  bool host = false;
++  bool deleted = false;
++  uint64_t session_id = 0;
++  uint64_t nonce = 0;
++  uint32_t flags = 0;
++  uint32_t user_index_host = 0xFE;
++  uint32_t max_public = 0;
++  uint32_t max_private = 0;
++  uint32_t game_type = 0;
++  uint32_t game_mode = 0;
++  uint32_t state = 0;  // XSESSION_STATE: 0 lobby, 2 in game
++  std::array<uint8_t, 0x3C> info = {};
++  std::map<uint64_t, Member> members;
++
++  uint32_t FilledPublic() const;
++  uint32_t FilledPrivate() const;
++};
++
++// XamSessionCreateHandle / XamSessionRefObjByHandle.
++X_RESULT CreateSessionHandle(uint32_t* handle_out);
++X_RESULT SessionObjectByHandle(uint32_t handle, uint32_t* guest_object_out);
++
++// XGI session messages; `obj_ptr` is the guest object from XamSessionRefObjByHandle.
++X_RESULT SessionCreate(uint32_t obj_ptr, uint32_t flags, uint32_t public_slots,
++                       uint32_t private_slots, uint32_t user_index, uint32_t session_info_ptr,
++                       uint32_t nonce_ptr);
++X_RESULT SessionDelete(uint32_t obj_ptr);
++X_RESULT SessionModify(uint32_t obj_ptr, uint32_t flags, uint32_t public_slots,
++                       uint32_t private_slots);
++X_RESULT SessionStart(uint32_t obj_ptr);
++X_RESULT SessionEnd(uint32_t obj_ptr);
++X_RESULT SessionJoin(uint32_t obj_ptr, uint32_t count, uint32_t xuids_ptr, uint32_t indices_ptr,
++                     uint32_t private_ptr);
++X_RESULT SessionLeave(uint32_t obj_ptr, uint32_t count, uint32_t xuids_ptr,
++                      uint32_t indices_ptr);
++X_RESULT SessionDetails(uint32_t obj_ptr, uint32_t size_ptr, uint32_t details_ptr);
++X_RESULT SessionSearch(uint32_t search_index, uint32_t user_index, uint32_t max_results,
++                       uint32_t num_contexts, uint32_t contexts_ptr, uint32_t buffer_size,
++                       uint32_t results_ptr, uint32_t num_users);
++
++}  // namespace rex::kernel::xam::live
+diff --git a/include/rex/kernel/xam/net_trace.h b/include/rex/kernel/xam/net_trace.h
+new file mode 100644
+index 0000000..5252128
+--- /dev/null
++++ b/include/rex/kernel/xam/net_trace.h
+@@ -0,0 +1,94 @@
++/**
++ * @file        net_trace.h
++ * @brief       --wwe_net_trace: a rate-limited log of the guest's network, XMsg and
++ *              session calls.
++ *
++ * A diagnostic for online play. Off by default; off, the wrapped exports behave exactly
++ * like REX_EXPORT / REX_EXPORT_STUB.
++ */
++
++#pragma once
++
++#include <cstdint>
++#include <mutex>
++#include <string>
++#include <unordered_map>
++
++#include <rex/cvar.h>
++#include <rex/hook.h>
++#include <rex/logging.h>
++#include <rex/system/kernel_state.h>
++
++REXCVAR_DECLARE(bool, wwe_net_trace);
++
++namespace rex::kernel::xam::net_trace {
++
++// Busy calls (a socket poll loop runs thousands a second) would rotate the log away:
++// each export logs its first 32 calls, then each power-of-two call.
++inline bool ShouldLog(const char* name, uint64_t* count) {
++  static std::mutex mutex;
++  static std::unordered_map<const char*, uint64_t> counts;
++  std::lock_guard lock(mutex);
++  *count = ++counts[name];
++  return *count <= 32 || (*count & (*count - 1)) == 0;
++}
++
++// A guest sockaddr_in as "a.b.c.d:port", for the export's address argument.
++inline std::string SockaddrText(uint32_t guest_address) {
++  if (!guest_address) {
++    return "null";
++  }
++  const uint8_t* p = REX_KERNEL_MEMORY()->TranslateVirtual<const uint8_t*>(guest_address);
++  return fmt::format("{}.{}.{}.{}:{} (family {})", p[4], p[5], p[6], p[7], (p[2] << 8) | p[3],
++                     (p[0] << 8) | p[1]);
++}
++
++// Raw argument registers before the call, r3 after it. NetDll_* imports take the
++// caller type in r3, so their real arguments start at r4. `sockaddr_reg` names the
++// register holding a sockaddr_in pointer to decode, or 0 for none.
++inline bool LogEnter(const char* name, const PPCContext& ctx, int sockaddr_reg = 0) {
++  uint64_t count = 0;
++  if (!ShouldLog(name, &count)) {
++    return false;
++  }
++  std::string address;
++  if (sockaddr_reg) {
++    const uint32_t regs[] = {ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32,
++                             ctx.r7.u32, ctx.r8.u32, ctx.r9.u32, ctx.r10.u32};
++    address = " addr=" + SockaddrText(regs[sockaddr_reg - 3]);
++  }
++  REXKRNL_INFO("[net] {}({:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}){} #{}", name,
++               ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, ctx.r8.u32, ctx.r9.u32,
++               address, count);
++  return true;
++}
++
++inline void LogLeave(const char* name, const PPCContext& ctx) {
++  REXKRNL_INFO("[net] {} -> {:08X}", name, ctx.r3.u32);
++}
++
++}  // namespace rex::kernel::xam::net_trace
++
++// REX_EXPORT with trace logging around the call.
++#define REX_TRACE_EXPORT_SOCKADDR(name, function, sockaddr_reg)                              \
++  extern "C" REX_FUNC(name) {                                                                \
++    const bool logged = REXCVAR_GET(wwe_net_trace) &&                                        \
++                        rex::kernel::xam::net_trace::LogEnter(#name, ctx, sockaddr_reg);     \
++    rex::ppc::HostToGuestFunction<function>(ctx, base);                                      \
++    if (logged) rex::kernel::xam::net_trace::LogLeave(#name, ctx);                           \
++  }                                                                                          \
++  static rex::ppc::detail::PPCFuncRegistrar _ppc_reg_##name(#name, &name);
++
++#define REX_TRACE_EXPORT(name, function) REX_TRACE_EXPORT_SOCKADDR(name, function, 0)
++
++// REX_EXPORT_STUB whose warning, with the trace on, goes through the trace's rate limit.
++#define REX_TRACE_EXPORT_STUB(name)                                              \
++  extern "C" REX_FUNC(name) {                                                    \
++    (void)base;                                                                  \
++    if (!REXCVAR_GET(wwe_net_trace)) {                                           \
++      REXKRNL_WARN("{} STUB", #name);                                            \
++    } else if (rex::kernel::xam::net_trace::LogEnter(#name " STUB", ctx)) {      \
++      rex::kernel::xam::net_trace::LogLeave(#name " STUB", ctx);                 \
++    }                                                                            \
++  }                                                                              \
++  static rex::ppc::detail::PPCFuncRegistrar _ppc_reg_##name(#name, &name);
+diff --git a/include/rex/system/overlapped_receive.h b/include/rex/system/overlapped_receive.h
+new file mode 100644
+index 0000000..e16792a
+--- /dev/null
++++ b/include/rex/system/overlapped_receive.h
+@@ -0,0 +1,108 @@
++/**
++ * @file        overlapped_receive.h
++ * @brief       Overlapped (asynchronous) guest socket receives.
++ *
++ * A guest WSARecvFrom with an OVERLAPPED that finds no datagram stays pending, and
++ * WSAGetOverlappedResult tries it again until a datagram arrives. Titles that poll their
++ * sockets (Quazal's PRUDP) get their replies this way. Pure logic: the receive attempt,
++ * the clock and the sleep are passed in, so the export code supplies the host socket and
++ * the tests a fake one.
++ */
++
++#pragma once
++
++#include <chrono>
++#include <cstddef>
++#include <cstdint>
++#include <mutex>
++#include <unordered_map>
++
++namespace rex::system::net {
++
++// Guest-visible WSA error codes for these paths.
++inline constexpr uint32_t kWsaIoIncomplete = 996;
++inline constexpr uint32_t kWsaIoPending = 997;
++inline constexpr uint32_t kWsaEWouldBlock = 10035;
++
++// Pending receives by the guest address of their OVERLAPPED. `Request` holds what a later
++// attempt needs and a `socket` member (the guest socket handle). A receive attempt is a
++// callable taking the request and returning the datagram's size, or a negative value when
++// none is waiting.
++template <typename Request>
++class OverlappedReceives {
++ public:
++  enum class Status {
++    kCompleted,   // `bytes` received
++    kPending,     // WSARecvFrom: overlapped, nothing yet (WSA_IO_PENDING)
++    kWouldBlock,  // WSARecvFrom: not overlapped, nothing yet (WSAEWOULDBLOCK)
++    kIncomplete,  // WSAGetOverlappedResult: still pending (WSA_IO_INCOMPLETE)
++    kNotPending,  // WSAGetOverlappedResult: nothing outstanding; the OVERLAPPED holds the result
++  };
++  struct Outcome {
++    Status status;
++    int bytes = 0;
++  };
++
++  // WSARecvFrom. `overlapped` is 0 for a plain receive. A new receive on an OVERLAPPED
++  // that is still pending replaces the old one.
++  template <typename Receive>
++  Outcome Start(uint32_t overlapped, const Request& request, Receive&& receive) {
++    std::lock_guard lock(mutex_);
++    if (overlapped) {
++      pending_.erase(overlapped);
++    }
++    const int received = receive(request);
++    if (received >= 0) {
++      return {Status::kCompleted, received};
++    }
++    if (!overlapped) {
++      return {Status::kWouldBlock};
++    }
++    pending_[overlapped] = request;
++    return {Status::kPending};
++  }
++
++  // WSAGetOverlappedResult. Tries the pending receive until it completes or `wait` has
++  // passed (zero: one try), sleeping between tries.
++  template <typename Receive, typename Now, typename Sleep>
++  Outcome Poll(uint32_t overlapped, std::chrono::steady_clock::duration wait, Receive&& receive,
++               Now&& now, Sleep&& sleep) {
++    const auto give_up = now() + wait;
++    for (;;) {
++      {
++        // Under the lock, so two pollers of one OVERLAPPED can't both take a datagram.
++        std::lock_guard lock(mutex_);
++        auto it = pending_.find(overlapped);
++        if (it == pending_.end()) {
++          return {Status::kNotPending};
++        }
++        const int received = receive(it->second);
++        if (received >= 0) {
++          pending_.erase(it);
++          return {Status::kCompleted, received};
++        }
++      }
++      if (now() >= give_up) {
++        return {Status::kIncomplete};
++      }
++      sleep();
++    }
++  }
++
++  // closesocket: the socket's pending receives can never complete.
++  void Forget(uint32_t socket) {
++    std::lock_guard lock(mutex_);
++    std::erase_if(pending_, [socket](const auto& entry) { return entry.second.socket == socket; });
++  }
++
++  size_t pending() const {
++    std::lock_guard lock(mutex_);
++    return pending_.size();
++  }
++
++ private:
++  mutable std::mutex mutex_;
++  std::unordered_map<uint32_t, Request> pending_;
++};
++
++}  // namespace rex::system::net
+diff --git a/include/rex/system/xam/user_profile.h b/include/rex/system/xam/user_profile.h
+index ec37017..7ccf99d 100644
+--- a/include/rex/system/xam/user_profile.h
++++ b/include/rex/system/xam/user_profile.h
+@@ -18,6 +18,7 @@
+ 
+ #include <fmt/format.h>
+ 
++#include <rex/kernel/xam/live/live.h>
+ #include <rex/memory.h>
+ #include <rex/stream.h>
+ #include <rex/system/xtypes.h>
+@@ -218,7 +219,9 @@ class UserProfile {
+ 
+   uint64_t xuid() const { return xuid_; }
+   std::string name() const { return name_; }
+-  uint32_t signin_state() const { return 1; }
++  // 1 = signed in locally; 2 = signed in to Xbox LIVE (--wwe_online, once the game server
++  // answered).
++  uint32_t signin_state() const { return rex::kernel::xam::live::SignedIn() ? 2 : 1; }
+   uint32_t type() const { return 1 | 2; /* local | online profile? */ }
+ 
+   void set_kernel_state(KernelState* ks) { kernel_state_ = ks; }
+diff --git a/include/rex/system/xsocket.h b/include/rex/system/xsocket.h
+index a1b4443..f33f25c 100644
+--- a/include/rex/system/xsocket.h
++++ b/include/rex/system/xsocket.h
+@@ -95,6 +95,7 @@ class XSocket : public XObject {
+ 
+   uint64_t native_handle() const { return native_handle_; }
+   uint16_t bound_port() const { return bound_port_; }
++  bool bound() const { return bound_; }
+ 
+   X_STATUS Initialize(AddressFamily af, Type type, Protocol proto);
+   X_STATUS Close();
+diff --git a/src/kernel/CMakeLists.txt b/src/kernel/CMakeLists.txt
+index 984b97d..618f1b6 100644
+--- a/src/kernel/CMakeLists.txt
++++ b/src/kernel/CMakeLists.txt
+@@ -28,6 +28,17 @@ set(REXKERNEL_SOURCES
+     xam/apps/xlivebase_app.cpp
+     xam/apps/xmp_app.cpp
+ 
++    # WWE All Stars recomp: online play (.scratch/online-play/)
++    xam/live/http.cpp
++    xam/live/identity.cpp
++    xam/live/live.cpp
++    xam/live/relay.cpp
++    xam/live/relay_protocol.cpp
++    xam/live/upnp.cpp
++    xam/live/session_data.cpp
++    xam/live/xlive_json.cpp
++    xam/live/xsession.cpp
++
+     # XBDM subsystem - provides __imp__Xbdm* symbols
+     xbdm/xbdm_module.cpp
+     xbdm/xbdm_misc.cpp
+@@ -67,3 +78,46 @@ list(TRANSFORM REXKERNEL_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
+ target_sources(rexruntime PRIVATE ${REXKERNEL_SOURCES})
+ 
+ target_link_libraries(rexruntime PRIVATE o1heap rexcore rexfilesystem rexui rexaudio rexinput imgui)
++
++# WWE All Stars recomp, online play: the client ported from the Xenia netplay fork talks
++# HTTP(S) to the game server with libcurl (Schannel) and reads its JSON with rapidjson, from
++# the source folders scripts/bootstrap.ps1 fetches at the fork's pinned commits.
++set(REXGLUE_CURL_SOURCE_DIR "" CACHE PATH "libcurl source folder (online play)")
++set(REXGLUE_RAPIDJSON_SOURCE_DIR "" CACHE PATH "rapidjson source folder (online play)")
++if(NOT EXISTS "${REXGLUE_CURL_SOURCE_DIR}/CMakeLists.txt" OR
++   NOT EXISTS "${REXGLUE_RAPIDJSON_SOURCE_DIR}/include/rapidjson/rapidjson.h")
++    message(FATAL_ERROR "Set REXGLUE_CURL_SOURCE_DIR and REXGLUE_RAPIDJSON_SOURCE_DIR "
++        "(scripts/bootstrap.ps1 fetches both).")
++endif()
++set(BUILD_SHARED_LIBS OFF)
++foreach(_curl_on BUILD_STATIC_LIBS CURL_DISABLE_INSTALL HTTP_ONLY)
++    set(${_curl_on} ON CACHE BOOL "" FORCE)
++endforeach()
++foreach(_curl_off BUILD_CURL_EXE BUILD_TESTING BUILD_LIBCURL_DOCS BUILD_MISC_DOCS
++        ENABLE_CURL_MANUAL BUILD_EXAMPLES CURL_ZLIB CURL_BROTLI CURL_ZSTD USE_NGHTTP2
++        USE_LIBIDN2 USE_WIN32_IDN CURL_USE_LIBPSL CURL_USE_LIBSSH2 CURL_USE_LIBSSH
++        CURL_USE_GSSAPI CURL_USE_OPENSSL CURL_USE_MBEDTLS CURL_USE_WOLFSSL CURL_USE_GNUTLS
++        CURL_USE_RUSTLS ENABLE_UNICODE CURL_LTO)
++    set(${_curl_off} OFF CACHE BOOL "" FORCE)
++endforeach()
++if(WIN32)
++    set(CURL_USE_SCHANNEL ON CACHE BOOL "" FORCE)
++endif()
++add_subdirectory(${REXGLUE_CURL_SOURCE_DIR} ${CMAKE_BINARY_DIR}/thirdparty/curl EXCLUDE_FROM_ALL)
++target_link_libraries(rexruntime PRIVATE CURL::libcurl_static)
++target_include_directories(rexruntime PUBLIC
++    $<BUILD_INTERFACE:${REXGLUE_RAPIDJSON_SOURCE_DIR}/include>)
++
++# UPnP port mapping (--wwe_online_upnp) with miniupnpc, at the fork's pinned commit.
++set(REXGLUE_MINIUPNPC_SOURCE_DIR "" CACHE PATH "miniupnpc source folder (online play)")
++if(NOT EXISTS "${REXGLUE_MINIUPNPC_SOURCE_DIR}/include/miniupnpc.h")
++    message(FATAL_ERROR "Set REXGLUE_MINIUPNPC_SOURCE_DIR (scripts/bootstrap.ps1 fetches it).")
++endif()
++foreach(_upnpc_off UPNPC_BUILD_SHARED UPNPC_BUILD_TESTS UPNPC_BUILD_SAMPLE)
++    set(${_upnpc_off} OFF CACHE BOOL "" FORCE)
++endforeach()
++set(UPNPC_BUILD_STATIC ON CACHE BOOL "" FORCE)
++set(UPNPC_NO_INSTALL ON CACHE BOOL "" FORCE)
++add_subdirectory(${REXGLUE_MINIUPNPC_SOURCE_DIR} ${CMAKE_BINARY_DIR}/thirdparty/miniupnpc
++    EXCLUDE_FROM_ALL)
++target_link_libraries(rexruntime PRIVATE libminiupnpc-static)
+diff --git a/src/kernel/xam/apps/xgi_app.cpp b/src/kernel/xam/apps/xgi_app.cpp
+index 2b222da..efeab2d 100644
+--- a/src/kernel/xam/apps/xgi_app.cpp
++++ b/src/kernel/xam/apps/xgi_app.cpp
+@@ -10,6 +10,8 @@
+  */
+ 
+ #include <rex/kernel/xam/apps/xgi_app.h>
++#include <rex/kernel/xam/live/live.h>
++#include <rex/kernel/xam/live/xsession.h>
+ #include <rex/logging.h>
+ #include <rex/thread.h>
+ 
+@@ -29,6 +31,35 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+                                       uint32_t buffer_length) {
+   // NOTE: buffer_length may be zero or valid.
+   auto buffer = memory_->TranslateVirtual(buffer_ptr);
++  if (live::Enabled()) {
++    auto u32 = [&](uint32_t at) { return memory::load_and_swap<uint32_t>(buffer + at); };
++    auto u16 = [&](uint32_t at) { return uint32_t(memory::load_and_swap<uint16_t>(buffer + at)); };
++    switch (message) {
++      case 0x000B0010:  // XSessionCreate
++        return live::SessionCreate(u32(0), u32(4), u32(8), u32(12), u32(16), u32(20), u32(24));
++      case 0x000B0011:  // XSessionDelete
++        return live::SessionDelete(u32(0));
++      case 0x000B0012:  // XSessionJoinLocal / JoinRemote
++        return live::SessionJoin(u32(0), u32(4), u32(8), u32(12), u32(16));
++      case 0x000B0013:  // XSessionLeaveLocal / LeaveRemote
++        return live::SessionLeave(u32(0), u32(4), u32(8), u32(12));
++      case 0x000B0014:  // XSessionStart
++        return live::SessionStart(u32(0));
++      case 0x000B0015:  // XSessionEnd
++        return live::SessionEnd(u32(0));
++      case 0x000B0016:  // XSessionSearch
++        return live::SessionSearch(u32(0), u32(4), u32(8), u16(14), u32(20), u32(24), u32(28), 1);
++      case 0x000B0018:  // XSessionModify
++        return live::SessionModify(u32(0), u32(4), u32(8), u32(12));
++      case 0x000B001C:  // XSessionSearchEx
++        return live::SessionSearch(u32(0), u32(4), u32(8), u16(14), u32(20), u32(24), u32(28),
++                                   u32(32));
++      case 0x000B001D:  // XSessionGetDetails
++        return live::SessionDetails(u32(0), u32(4), u32(8));
++      default:
++        break;
++    }
++  }
+   switch (message) {
+     case 0x000B0006: {
+       assert_true(!buffer_length || buffer_length == 24);
+@@ -42,6 +73,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       uint32_t context_value = memory::load_and_swap<uint32_t>(buffer + 20);
+       REXKRNL_DEBUG("XGIUserSetContextEx({:08X}, {:08X}, {:08X})", user_index, context_id,
+                     context_value);
++      live::SetUserContext(user_index, context_id, context_value);
+       return X_E_SUCCESS;
+     }
+     case 0x000B0007: {
+@@ -51,6 +83,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       uint32_t value_ptr = memory::load_and_swap<uint32_t>(buffer + 24);
+       REXKRNL_DEBUG("XGIUserSetPropertyEx({:08X}, {:08X}, {}, {:08X})", user_index, property_id,
+                     value_size, value_ptr);
++      if (value_ptr && value_size) {
++        live::SetUserProperty(user_index, live::GuestProperty(
++                                              property_id, memory_->TranslateVirtual(value_ptr),
++                                              value_size));
++      }
+       return X_E_SUCCESS;
+     }
+     case 0x000B0008: {
+diff --git a/src/kernel/xam/live/http.cpp b/src/kernel/xam/live/http.cpp
+new file mode 100644
+index 0000000..729fa98
+--- /dev/null
++++ b/src/kernel/xam/live/http.cpp
+@@ -0,0 +1,70 @@
++/**
++ * @file        http.cpp
++ * @brief       The online client's HTTP requests (see http.h).
++ *
++ * After the Xenia netplay fork's XLiveAPI::Get/Post/Delete (src/xenia/kernel/XLiveAPI.cpp,
++ * Copyright 2026 Xenia Canary, BSD license).
++ */
++
++#include <rex/kernel/xam/live/http.h>
++
++#include <mutex>
++
++#include <curl/curl.h>
++
++#include <rex/logging.h>
++
++namespace rex::kernel::xam::live {
++
++namespace {
++
++size_t Append(void* data, size_t size, size_t count, void* body) {
++  static_cast<std::string*>(body)->append(static_cast<const char*>(data), size * count);
++  return size * count;
++}
++
++}  // namespace
++
++HttpResponse HttpRequest(const std::string& method, const std::string& url,
++                         const std::string& body) {
++  static std::once_flag global_init;
++  std::call_once(global_init, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
++
++  HttpResponse response;
++  CURL* curl = curl_easy_init();
++  if (!curl) {
++    REXKRNL_ERROR("[online] cannot initialize libcurl");
++    return response;
++  }
++  curl_slist* headers = nullptr;
++  headers = curl_slist_append(headers, "Content-Type: application/json");
++  headers = curl_slist_append(headers, "Accept: application/json");
++  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
++  curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
++  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
++  curl_easy_setopt(curl, CURLOPT_USERAGENT, "wweallstars");
++  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 3L);
++  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 8L);
++  curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
++  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, Append);
++  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response.body);
++  if (method == "POST") {
++    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
++    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, curl_off_t(body.size()));
++  }
++  const CURLcode result = curl_easy_perform(curl);
++  if (result == CURLE_OK) {
++    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response.status);
++    char* local_ip = nullptr;
++    if (curl_easy_getinfo(curl, CURLINFO_LOCAL_IP, &local_ip) == CURLE_OK && local_ip) {
++      response.local_ip = local_ip;
++    }
++  } else {
++    REXKRNL_ERROR("[online] {} {}: {}", method, url, curl_easy_strerror(result));
++  }
++  curl_slist_free_all(headers);
++  curl_easy_cleanup(curl);
++  return response;
++}
++
++}  // namespace rex::kernel::xam::live
+diff --git a/src/kernel/xam/live/identity.cpp b/src/kernel/xam/live/identity.cpp
+new file mode 100644
+index 0000000..9da3ba6
+--- /dev/null
++++ b/src/kernel/xam/live/identity.cpp
+@@ -0,0 +1,112 @@
++/**
++ * @file        identity.cpp
++ * @brief       The install's online identity (see identity.h).
++ */
++
++#include <rex/kernel/xam/live/identity.h>
++
++#include <fstream>
++#include <sstream>
++
++#include <fmt/format.h>
++#include <rapidjson/document.h>
++
++namespace rex::kernel::xam::live {
++
++OnlineIdentity NewIdentity(std::mt19937_64& random) {
++  OnlineIdentity identity;
++  do {
++    identity.xuid = 0x0009000000000000ull | (random() & 0x0000FFFFFFFFFFFFull);
++  } while ((identity.xuid & 0x0000FFFFFFFFFFFFull) == 0);
++  const uint64_t bits = random();
++  for (size_t i = 0; i < identity.mac.size(); ++i) {
++    identity.mac[i] = uint8_t(bits >> (8 * i));
++  }
++  identity.mac[0] = uint8_t((identity.mac[0] & 0xFC) | 0x02);
++  return identity;
++}
++
++std::string MacText(const std::array<uint8_t, 6>& mac) {
++  return fmt::format("{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}", mac[0], mac[1], mac[2], mac[3],
++                     mac[4], mac[5]);
++}
++
++std::optional<std::array<uint8_t, 6>> ParseMac(std::string_view text) {
++  std::string digits;
++  for (char c : text) {
++    if (c != ':' && c != '-') {
++      digits.push_back(c);
++    }
++  }
++  if (digits.size() != 12) {
++    return std::nullopt;
++  }
++  std::array<uint8_t, 6> mac{};
++  for (size_t i = 0; i < mac.size(); ++i) {
++    unsigned value = 0;
++    for (size_t j = 0; j < 2; ++j) {
++      const char c = digits[i * 2 + j];
++      unsigned digit;
++      if (c >= '0' && c <= '9') {
++        digit = unsigned(c - '0');
++      } else if (c >= 'a' && c <= 'f') {
++        digit = unsigned(c - 'a' + 10);
++      } else if (c >= 'A' && c <= 'F') {
++        digit = unsigned(c - 'A' + 10);
++      } else {
++        return std::nullopt;
++      }
++      value = value * 16 + digit;
++    }
++    mac[i] = uint8_t(value);
++  }
++  return mac;
++}
++
++std::string SerializeIdentity(const OnlineIdentity& identity) {
++  return fmt::format("{{\n  \"xuid\": \"{:016X}\",\n  \"mac\": \"{}\"\n}}\n", identity.xuid,
++                     MacText(identity.mac));
++}
++
++std::optional<OnlineIdentity> ParseIdentity(std::string_view json) {
++  rapidjson::Document doc;
++  doc.Parse(json.data(), json.size());
++  if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("xuid") ||
++      !doc["xuid"].IsString() || !doc.HasMember("mac") || !doc["mac"].IsString()) {
++    return std::nullopt;
++  }
++  OnlineIdentity identity;
++  try {
++    identity.xuid = std::stoull(doc["xuid"].GetString(), nullptr, 16);
++  } catch (...) {
++    return std::nullopt;
++  }
++  const auto mac = ParseMac(doc["mac"].GetString());
++  if ((identity.xuid >> 48) != 0x0009 || !mac) {
++    return std::nullopt;
++  }
++  identity.mac = *mac;
++  return identity;
++}
++
++OnlineIdentity LoadOrCreateIdentity(const std::filesystem::path& folder,
++                                    std::mt19937_64& random) {
++  const auto file = folder / kIdentityFileName;
++  {
++    std::ifstream in(file, std::ios::binary);
++    if (in) {
++      std::stringstream text;
++      text << in.rdbuf();
++      if (auto identity = ParseIdentity(text.str())) {
++        return *identity;
++      }
++    }
++  }
++  const OnlineIdentity identity = NewIdentity(random);
++  std::error_code ignored;
++  std::filesystem::create_directories(folder, ignored);
++  std::ofstream(file, std::ios::binary | std::ios::trunc) << SerializeIdentity(identity);
++  return identity;
++}
++
++}  // namespace rex::kernel::xam::live
+diff --git a/src/kernel/xam/live/live.cpp b/src/kernel/xam/live/live.cpp
+new file mode 100644
+index 0000000..414d786
+--- /dev/null
++++ b/src/kernel/xam/live/live.cpp
+@@ -0,0 +1,304 @@
++/**
++ * @file        live.cpp
++ * @brief       --wwe_online: Xbox LIVE sign-in against the game server (see live.h).
++ *
++ * After the Xenia netplay fork's XLiveAPI::Init, Getwhoami, RegisterPlayer, FindPlayer and
++ * GetServers (src/xenia/kernel/XLiveAPI.cpp, Copyright 2026 Xenia Canary, BSD license).
++ */
++
++#include <rex/kernel/xam/live/live.h>
++
++#include <chrono>
++#include <cstdlib>
++#include <mutex>
++#include <random>
++
++#include <fmt/format.h>
++
++#include <rex/kernel/xam/live/http.h>
++#include <rex/kernel/xam/live/identity.h>
++#include <rex/kernel/xam/live/relay.h>
++#include <rex/kernel/xam/live/upnp.h>
++#include <rex/kernel/xam/live/xsession.h>
++#include <rex/logging.h>
++#include <rex/runtime.h>
++#include <rex/system/kernel_state.h>
++#include <rex/system/xam/user_profile.h>
++
++REXCVAR_DEFINE_BOOL(wwe_online, false, "Kernel",
++                    "Online play (experimental): sign in to Xbox LIVE against the game server");
++REXCVAR_DEFINE_STRING(wwe_online_server, "https://allstars.komplexaci.cz", "Kernel",
++                      "Online play: the game server (host, host:port or URL; HTTP port 36000 "
++                      "for a bare host). The owner's server by default");
++REXCVAR_DEFINE_STRING(wwe_online_ip, "", "Kernel",
++                      "Online play: bind every socket to this address, e.g. 127.0.0.2 for a "
++                      "second copy on one PC");
++REXCVAR_DEFINE_STRING(wwe_online_name, "", "Kernel",
++                      "Online play: the name other players see (the profile's gamertag when "
++                      "empty)");
++
++namespace rex::kernel::xam::live {
++
++namespace {
++
++// A failed sign-in (server down) is retried this often, not on every call.
++constexpr auto kRetryInterval = std::chrono::seconds(10);
++
++struct State {
++  std::mutex mutex;
++  bool identity_loaded = false;
++  OnlineIdentity identity;
++  bool signed_in = false;
++  std::chrono::steady_clock::time_point last_attempt{};
++  uint32_t online_address = 0;
++  uint32_t local_address = 0;
++  bool servers_cached = false;
++  std::vector<TitleServer> servers;
++};
++
++State& state() {
++  static State s;
++  return s;
++}
++
++std::string Url(const std::string& endpoint) {
++  return ApiBaseUrl(REXCVAR_GET(wwe_online_server)) + endpoint;
++}
++
++std::string AddressText(uint32_t address) {
++  return fmt::format("{}.{}.{}.{}", address >> 24, (address >> 16) & 0xFF,
++                     (address >> 8) & 0xFF, address & 0xFF);
++}
++
++void LoadIdentity(State& s) {
++  if (s.identity_loaded) {
++    return;
++  }
++  std::random_device device;
++  std::mt19937_64 random((uint64_t(device()) << 32) ^ device() ^
++                         uint64_t(std::chrono::steady_clock::now().time_since_epoch().count()));
++  const auto folder = REX_KERNEL_STATE()->emulator()->user_data_root();
++  s.identity = LoadOrCreateIdentity(folder, random);
++  s.identity_loaded = true;
++  REXKRNL_INFO("[online] identity XUID {:016X}, MAC {} ({})", s.identity.xuid,
++               MacText(s.identity.mac), (folder / kIdentityFileName).string());
++}
++
++// The registration's relay, for peers that cannot be reached directly.
++void ConfigureRelay(const std::string& registration_body, uint64_t xuid) {
++  const auto registration = ParseRegistration(registration_body);
++  const auto& address = registration ? registration->relay_address : std::string();
++  const auto colon = address.rfind(':');
++  const auto host = colon == std::string::npos ? std::nullopt
++                                               : ParseIPv4(address.substr(0, colon));
++  const auto token = registration ? relay::ParseToken(registration->relay_token) : std::nullopt;
++  int port = 0;
++  if (host) {
++    port = std::atoi(address.c_str() + colon + 1);
++  }
++  if (!host || !token || port <= 0 || port > 0xFFFF) {
++    REXKRNL_ERROR("[online] the game server offers no relay: every peer is reached directly");
++    return;
++  }
++  relay::Configure(*host, uint16_t(port), xuid, *token, BindAddress());
++}
++
++// whoami, then players: the server learns this copy's XUID, name, address and MAC. Runs
++// without the state lock; `identity` is loaded and only read meanwhile.
++bool SignIn(State& s, const OnlineIdentity& identity) {
++  const auto whoami = HttpRequest("GET", Url("whoami"));
++  const auto address_text = whoami.status == 200 ? ParseWhoami(whoami.body) : std::nullopt;
++  const auto address = address_text ? ParseIPv4(*address_text) : std::nullopt;
++  if (!address) {
++    REXKRNL_ERROR("[online] the game server at {} did not answer whoami (HTTP {})",
++                  Url(""), whoami.status);
++    return false;
++  }
++  const uint32_t local = BindAddress() ? BindAddress()
++                                       : ParseIPv4(whoami.local_ip).value_or(*address);
++  {
++    std::lock_guard lock(s.mutex);
++    s.online_address = *address;
++    s.local_address = local;
++  }
++
++  PlayerRecord player;
++  player.xuid = identity.xuid;
++  player.gamertag = Gamertag();
++  player.host_address = *address_text;
++  player.local_address = AddressText(local);
++  player.mac = identity.mac;
++  player.machine_id = 0xFA00000000000000ull | (identity.xuid & 0x0000FFFFFFFFFFFFull);
++  player.build_id = BuildId();
++  relay::ListenForProbes(BindAddress());
++  player.mapped_ports = upnp::MapPorts();
++  const auto registered = HttpRequest("POST", Url("players"), PlayerJson(player));
++  if (registered.status == 426) {
++    // The server runs another game version: the player has to update the port.
++    REXKRNL_ERROR("[online] the game server refused this version of the port: {}",
++                  ParseRefusal(registered.body).value_or("update to play online"));
++    return false;
++  }
++  if (registered.status != 201) {
++    REXKRNL_ERROR("[online] registering with the game server failed (HTTP {})",
++                  registered.status);
++    return false;
++  }
++  REXKRNL_INFO("[online] signed in to {} as {:016X} \"{}\" at {}, local {}", Url(""),
++               player.xuid, player.gamertag, *address_text, player.local_address);
++  if (const auto it = player.mapped_ports.find(relay::kProbePort);
++      it != player.mapped_ports.end()) {
++    const auto registration = ParseRegistration(registered.body);
++    if (registration && registration->reachable == true) {
++      REXKRNL_INFO("[online] UPnP: the game server reached this PC at {}:{}", *address_text,
++                   it->second);
++    } else {
++      REXKRNL_WARN("[online] UPnP: the game server could not reach this PC at {}:{}",
++                   *address_text, it->second);
++    }
++  }
++  ConfigureRelay(registered.body, player.xuid);
++  return true;
++}
++
++}  // namespace
++
++bool Enabled() {
++  return REXCVAR_GET(wwe_online);
++}
++
++bool SignedIn() {
++  if (!Enabled()) {
++    return false;
++  }
++  auto& s = state();
++  // One attempt at a time; callers wait for it, as the game expects an answer. The state
++  // lock stays free meanwhile, so the XUID, MAC and address calls never wait on HTTP.
++  static std::mutex attempt;
++  std::lock_guard attempt_lock(attempt);
++  OnlineIdentity identity;
++  {
++    std::lock_guard lock(s.mutex);
++    if (s.signed_in) {
++      return true;
++    }
++    const auto now = std::chrono::steady_clock::now();
++    if (s.last_attempt != std::chrono::steady_clock::time_point{} &&
++        now - s.last_attempt < kRetryInterval) {
++      return false;
++    }
++    s.last_attempt = now;
++    LoadIdentity(s);
++    identity = s.identity;
++  }
++  const bool ok = SignIn(s, identity);
++  std::lock_guard lock(s.mutex);
++  s.signed_in = ok;
++  return ok;
++}
++
++uint64_t OnlineXuid() {
++  auto& s = state();
++  std::lock_guard lock(s.mutex);
++  LoadIdentity(s);
++  return s.identity.xuid;
++}
++
++std::array<uint8_t, 6> Mac() {
++  auto& s = state();
++  std::lock_guard lock(s.mutex);
++  LoadIdentity(s);
++  return s.identity.mac;
++}
++
++std::string Gamertag() {
++  const std::string& name = REXCVAR_GET(wwe_online_name);
++  if (!name.empty()) {
++    return name.substr(0, 15);
++  }
++  return REX_KERNEL_STATE()->user_profile()->name();
++}
++
++uint32_t BindAddress() {
++  return ParseIPv4(REXCVAR_GET(wwe_online_ip)).value_or(0);
++}
++
++uint32_t OnlineAddress() {
++  auto& s = state();
++  std::lock_guard lock(s.mutex);
++  return s.online_address;
++}
++
++uint32_t LocalAddress() {
++  auto& s = state();
++  std::lock_guard lock(s.mutex);
++  return s.local_address;
++}
++
++std::vector<TitleServer> TitleServers() {
++  if (!SignedIn()) {
++    return {};
++  }
++  auto& s = state();
++  std::lock_guard lock(s.mutex);
++  if (!s.servers_cached) {
++    const auto response = HttpRequest(
++        "GET", Url(fmt::format("title/{:08X}/servers", REX_KERNEL_STATE()->title_id())));
++    if (response.status == 200) {
++      s.servers = ParseTitleServers(response.body);
++      s.servers_cached = true;
++      for (const auto& server : s.servers) {
++        REXKRNL_INFO("[online] LSP server {} \"{}\"", AddressText(server.address),
++                     server.description);
++      }
++    } else {
++      REXKRNL_ERROR("[online] title server list failed (HTTP {})", response.status);
++    }
++  }
++  return s.servers;
++}
++
++void PostQosData(uint64_t session_id, const std::string& data) {
++  const auto response = HttpRequest(
++      "POST",
++      Url(fmt::format("title/{:08X}/sessions/{:016x}/qos", REX_KERNEL_STATE()->title_id(),
++                      session_id)),
++      data);
++  if (response.status != 201) {
++    REXKRNL_ERROR("[online] QoS data for {:016X} failed (HTTP {})", session_id, response.status);
++  }
++}
++
++std::string GetQosData(uint64_t session_id) {
++  const auto response = HttpRequest(
++      "GET", Url(fmt::format("title/{:08X}/sessions/{:016x}/qos", REX_KERNEL_STATE()->title_id(),
++                             session_id)));
++  return response.status == 200 ? response.body : std::string();
++}
++
++namespace {
++std::optional<PlayerRecord> FindPlayerBy(const std::string& query) {
++  if (!SignedIn()) {
++    return std::nullopt;
++  }
++  const auto response = HttpRequest("POST", Url("players/find"), query);
++  if (response.status != 201) {
++    return std::nullopt;
++  }
++  return ParsePlayer(response.body);
++}
++}  // namespace
++
++std::optional<PlayerRecord> FindPlayer(uint32_t address) {
++  return FindPlayerBy(fmt::format(R"({{"hostAddress":"{}"}})", AddressText(address)));
++}
++
++std::optional<PlayerRecord> FindPlayerByMac(const std::array<uint8_t, 6>& mac) {
++  return FindPlayerBy(fmt::format(R"({{"macAddress":"{}"}})", MacText(mac)));
++}
++
++std::optional<PlayerRecord> FindPlayerByXuid(uint64_t xuid) {
++  return FindPlayerBy(fmt::format(R"({{"xuid":"{:016X}"}})", xuid));
++}
++
++}  // namespace rex::kernel::xam::live
+diff --git a/src/kernel/xam/live/relay.cpp b/src/kernel/xam/live/relay.cpp
+new file mode 100644
+index 0000000..2184179
+--- /dev/null
++++ b/src/kernel/xam/live/relay.cpp
+@@ -0,0 +1,467 @@
++/**
++ * @file        relay.cpp
++ * @brief       The peer transport through the game server's relay (see relay.h).
++ */
++
++#include <rex/kernel/xam/live/relay.h>
++
++#include <algorithm>
++#include <chrono>
++#include <mutex>
++#include <string>
++#include <thread>
++#include <vector>
++
++#include <fmt/format.h>
++
++#include <rex/kernel/xam/live/addressing.h>
++#include <rex/kernel/xam/live/upnp.h>
++#include <rex/logging.h>
++#include <rex/thread.h>
++
++#if REX_PLATFORM_WIN32
++// NOTE: must be included last as it expects windows.h to already be included.
++#include <winsock2.h>  // NOLINT(build/include_order)
++#elif REX_PLATFORM_LINUX || REX_PLATFORM_MAC
++#include <arpa/inet.h>
++#include <netinet/in.h>
++#include <sys/select.h>
++#include <sys/socket.h>
++#include <unistd.h>
++#endif
++
++REXCVAR_DEFINE_BOOL(wwe_online_force_relay, false, "Kernel",
++                    "Online play (developer): send every peer's traffic through the game "
++                    "server's relay");
++REXCVAR_DEFINE_BOOL(wwe_online_drop_direct, false, "Kernel",
++                    "Online play (developer): drop direct peer traffic, so peers fall back "
++                    "to the relay");
++
++namespace rex::kernel::xam::live::relay {
++
++namespace {
++
++#if REX_PLATFORM_WIN32
++using Native = SOCKET;
++constexpr Native kNoSocket = INVALID_SOCKET;
++using AddressLength = int;
++void CloseNative(Native s) {
++  closesocket(s);
++}
++#else
++using Native = int;
++constexpr Native kNoSocket = -1;
++using AddressLength = socklen_t;
++void CloseNative(Native s) {
++  close(s);
++}
++#endif
++
++using Clock = std::chrono::steady_clock;
++constexpr auto kHelloUntilWelcome = std::chrono::seconds(1);
++constexpr auto kKeepAlive = std::chrono::seconds(10);
++constexpr auto kPingInterval = std::chrono::seconds(2);
++constexpr auto kReportInterval = std::chrono::seconds(10);
++// A direct probe: this many tries this far apart, then the peer goes through the relay.
++constexpr int kProbeTries = 6;
++constexpr auto kProbeEvery = std::chrono::milliseconds(100);
++
++sockaddr_in Endpoint(uint32_t address, uint16_t port) {
++  sockaddr_in out{};
++  out.sin_family = AF_INET;
++  out.sin_addr.s_addr = htonl(address);
++  out.sin_port = htons(port);
++  return out;
++}
++
++std::string AddressText(uint32_t address) {
++  return fmt::format("{}.{}.{}.{}", address >> 24, (address >> 16) & 0xFF,
++                     (address >> 8) & 0xFF, address & 0xFF);
++}
++
++// A UDP socket bound to address:port, or kNoSocket.
++Native OpenUdp(uint32_t address, uint16_t port) {
++  Native s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
++  if (s == kNoSocket) {
++    return kNoSocket;
++  }
++#if REX_PLATFORM_WIN32
++  // A datagram to a closed port must not fail the next receive (WSAECONNRESET).
++  constexpr DWORD kSioUdpConnReset = 0x9800000C;
++  BOOL report = FALSE;
++  DWORD returned = 0;
++  WSAIoctl(s, kSioUdpConnReset, &report, sizeof(report), nullptr, 0, &returned, nullptr,
++           nullptr);
++#endif
++  const auto name = Endpoint(address, port);
++  if (bind(s, reinterpret_cast<const sockaddr*>(&name), sizeof(name)) != 0) {
++    CloseNative(s);
++    return kNoSocket;
++  }
++  return s;
++}
++
++struct Pump {
++  uint32_t stand_in = 0;
++  uint16_t port = 0;
++  Native socket = kNoSocket;
++};
++
++struct State {
++  std::mutex mutex;
++  bool configured = false;
++  sockaddr_in relay{};
++  uint32_t relay_address = 0;
++  uint16_t relay_port = 0;
++  uint64_t xuid = 0;
++  Token token{};
++  uint32_t copy_address = 0;  // --wwe_online_ip, 0 when unset
++  uint32_t game_address = 0;  // where the game's peer sockets listen
++  Native socket = kNoSocket;
++  PeerTable table;
++  RouteTable routes;
++  bool relaying = false;  // some peer goes through the relay: ping it
++  std::vector<Pump> pumps;
++};
++
++State& state() {
++  static State s;
++  return s;
++}
++
++// Listens on a stand-in address at every peer port; the caller holds the state lock.
++bool OpenPumps(State& s, uint32_t stand_in) {
++  std::vector<Pump> opened;
++  for (const uint16_t port : kPeerPorts) {
++    const Native socket = OpenUdp(stand_in, port);
++    if (socket == kNoSocket) {
++      for (const auto& pump : opened) {
++        CloseNative(pump.socket);
++      }
++      return false;
++    }
++    opened.push_back({stand_in, port, socket});
++  }
++  s.pumps.insert(s.pumps.end(), opened.begin(), opened.end());
++  return true;
++}
++
++// The caller holds the state lock.
++std::optional<uint32_t> AddPeer(State& s, uint64_t xuid) {
++  const bool known = s.table.StandInFor(xuid).has_value();
++  const auto stand_in =
++      s.table.Add(xuid, [&](uint32_t address) { return OpenPumps(s, address); });
++  if (!stand_in) {
++    REXKRNL_ERROR("[online] relay: no stand-in address could be bound for {:016X}", xuid);
++  } else if (!known) {
++    REXKRNL_INFO("[online] relay: peer {:016X} at stand-in {}", xuid, AddressText(*stand_in));
++  }
++  return stand_in;
++}
++
++void SendToRelay(const State& s, const std::vector<uint8_t>& packet) {
++  sendto(s.socket, reinterpret_cast<const char*>(packet.data()), int(packet.size()), 0,
++         reinterpret_cast<const sockaddr*>(&s.relay), sizeof(s.relay));
++}
++
++uint64_t Micros(Clock::time_point t) {
++  return uint64_t(
++      std::chrono::duration_cast<std::chrono::microseconds>(t.time_since_epoch()).count());
++}
++
++// Pings answered since the last report, in milliseconds.
++struct RoundTrips {
++  std::vector<double> samples;
++  Clock::time_point last_report = Clock::now();
++
++  void Report(Clock::time_point now) {
++    if (now - last_report < kReportInterval || samples.empty()) {
++      return;
++    }
++    const auto [low, high] = std::minmax_element(samples.begin(), samples.end());
++    double sum = 0;
++    for (const double sample : samples) {
++      sum += sample;
++    }
++    REXKRNL_INFO(
++        "[online] relay round trip {:.1f} ms average, {:.1f} min, {:.1f} max ({} pings)",
++        sum / samples.size(), *low, *high, samples.size());
++    samples.clear();
++    last_report = now;
++  }
++};
++
++// A datagram from the relay.
++void FromRelay(State& s, const uint8_t* data, size_t size, bool& welcomed,
++               RoundTrips& round_trips) {
++  const auto message = Parse(data, size);
++  if (!message) {
++    return;
++  }
++  switch (message->kind) {
++    case Message::kWelcome:
++      if (!welcomed) {
++        REXKRNL_INFO("[online] relay at {}:{} welcomed {:016X}", AddressText(s.relay_address),
++                     s.relay_port, message->value);
++      }
++      welcomed = true;
++      break;
++    case Message::kPong:
++      round_trips.samples.push_back(double(Micros(Clock::now()) - message->value) / 1000.0);
++      break;
++    case Message::kDeliver: {
++      // From the peer's stand-in address and port to the game's own port.
++      std::lock_guard lock(s.mutex);
++      if (s.routes.Get(message->value) == Route::kUndecided) {
++        REXKRNL_INFO("[online] peer {:016X}: relay (it reached us through the relay)",
++                     message->value);
++      }
++      s.routes.Relayed(message->value);
++      s.relaying = true;
++      const auto stand_in = AddPeer(s, message->value);
++      if (!stand_in) {
++        break;
++      }
++      const auto pump = std::find_if(s.pumps.begin(), s.pumps.end(), [&](const Pump& p) {
++        return p.stand_in == *stand_in && p.port == message->src_port;
++      });
++      if (pump == s.pumps.end()) {
++        break;
++      }
++      const auto to = Endpoint(s.game_address, message->dst_port);
++      sendto(pump->socket, reinterpret_cast<const char*>(message->payload), int(message->size),
++             0, reinterpret_cast<const sockaddr*>(&to), sizeof(to));
++      break;
++    }
++  }
++}
++
++void Run() {
++  auto& s = state();
++  std::vector<uint8_t> buffer(2048);
++  bool welcomed = false;
++  RoundTrips round_trips;
++  Clock::time_point last_hello{}, last_ping{};
++  for (;;) {
++    const auto now = Clock::now();
++    if (now - last_hello >= (welcomed ? kKeepAlive : kHelloUntilWelcome)) {
++      SendToRelay(s, Hello(s.xuid, s.token));
++      last_hello = now;
++    }
++    bool relaying;
++    {
++      std::lock_guard lock(s.mutex);
++      relaying = s.relaying;
++    }
++    if (welcomed && relaying && now - last_ping >= kPingInterval) {
++      SendToRelay(s, Ping(Micros(now)));
++      last_ping = now;
++    }
++    round_trips.Report(now);
++
++    std::vector<Pump> pumps;
++    {
++      std::lock_guard lock(s.mutex);
++      pumps = s.pumps;
++    }
++    fd_set readable;
++    FD_ZERO(&readable);
++    FD_SET(s.socket, &readable);
++    Native highest = s.socket;
++    for (const auto& pump : pumps) {
++      FD_SET(pump.socket, &readable);
++      highest = std::max(highest, pump.socket);
++    }
++    timeval timeout{0, 50000};
++    if (select(int(highest + 1), &readable, nullptr, nullptr, &timeout) <= 0) {
++      continue;
++    }
++    if (FD_ISSET(s.socket, &readable)) {
++      const int n =
++          recv(s.socket, reinterpret_cast<char*>(buffer.data()), int(buffer.size()), 0);
++      if (n > 0) {
++        FromRelay(s, buffer.data(), size_t(n), welcomed, round_trips);
++      }
++    }
++    // The game sent to a stand-in address: wrap it for that peer.
++    for (const auto& pump : pumps) {
++      if (!FD_ISSET(pump.socket, &readable)) {
++        continue;
++      }
++      sockaddr_in from{};
++      AddressLength from_length = sizeof(from);
++      const int n = recvfrom(pump.socket, reinterpret_cast<char*>(buffer.data()),
++                             int(buffer.size()), 0, reinterpret_cast<sockaddr*>(&from),
++                             &from_length);
++      if (n < 0) {
++        continue;
++      }
++      std::optional<uint64_t> peer;
++      {
++        std::lock_guard lock(s.mutex);
++        peer = s.table.XuidAt(pump.stand_in);
++      }
++      if (peer) {
++        SendToRelay(s, Send(*peer, ntohs(from.sin_port), pump.port, buffer.data(), size_t(n)));
++      }
++    }
++  }
++}
++
++// Answers every probe on the socket, from the address it came from.
++void AnswerProbes(Native responder) {
++  uint8_t buffer[64];
++  for (;;) {
++    sockaddr_in from{};
++    AddressLength from_length = sizeof(from);
++    const int n = recvfrom(responder, reinterpret_cast<char*>(buffer), int(sizeof(buffer)), 0,
++                           reinterpret_cast<sockaddr*>(&from), &from_length);
++    if (n < 0) {
++      std::this_thread::sleep_for(std::chrono::milliseconds(10));
++      continue;
++    }
++    const auto nonce = ParseProbe(buffer, size_t(n));
++    if (nonce && !REXCVAR_GET(wwe_online_drop_direct)) {
++      const auto answer = ProbeAnswer(*nonce);
++      sendto(responder, reinterpret_cast<const char*>(answer.data()), int(answer.size()), 0,
++             reinterpret_cast<const sockaddr*>(&from), from_length);
++    }
++  }
++}
++
++// Whether the peer at `address` answers a direct probe within kProbeTries * kProbeEvery.
++bool ProbeDirect(uint32_t copy_address, uint32_t address) {
++  const Native socket = OpenUdp(ImplicitBindAddress(address, copy_address), 0);
++  if (socket == kNoSocket) {
++    return false;
++  }
++  const uint64_t nonce = Micros(Clock::now()) ^ (uint64_t(address) << 32);
++  const auto probe = Probe(nonce);
++  const auto to = Endpoint(address, upnp::Peers().External(address, kProbePort));
++  uint8_t buffer[64];
++  bool answered = false;
++  for (int i = 0; i < kProbeTries && !answered; ++i) {
++    sendto(socket, reinterpret_cast<const char*>(probe.data()), int(probe.size()), 0,
++           reinterpret_cast<const sockaddr*>(&to), sizeof(to));
++    const auto deadline = Clock::now() + kProbeEvery;
++    for (auto now = Clock::now(); !answered && now < deadline; now = Clock::now()) {
++      fd_set readable;
++      FD_ZERO(&readable);
++      FD_SET(socket, &readable);
++      const auto wait =
++          std::chrono::duration_cast<std::chrono::microseconds>(deadline - now).count();
++      timeval timeout{};
++      timeout.tv_sec = decltype(timeout.tv_sec)(wait / 1000000);
++      timeout.tv_usec = decltype(timeout.tv_usec)(wait % 1000000);
++      if (select(int(socket + 1), &readable, nullptr, nullptr, &timeout) <= 0) {
++        continue;
++      }
++      const int n = recv(socket, reinterpret_cast<char*>(buffer), int(sizeof(buffer)), 0);
++      answered = n > 0 && ParseProbeAnswer(buffer, size_t(n)) == nonce;
++    }
++  }
++  CloseNative(socket);
++  return answered;
++}
++
++}  // namespace
++
++bool Forced() {
++  return REXCVAR_GET(wwe_online_force_relay);
++}
++
++void Configure(uint32_t relay_address, uint16_t relay_port, uint64_t own_xuid,
++               const Token& token, uint32_t copy_address) {
++  auto& s = state();
++  std::lock_guard lock(s.mutex);
++  if (s.configured) {
++    return;
++  }
++  s.socket = OpenUdp(0, 0);
++  if (s.socket == kNoSocket) {
++    REXKRNL_ERROR("[online] relay: cannot open a socket");
++    return;
++  }
++  s.relay = Endpoint(relay_address, relay_port);
++  s.relay_address = relay_address;
++  s.relay_port = relay_port;
++  s.xuid = own_xuid;
++  s.token = token;
++  s.copy_address = copy_address;
++  // A socket bound to every address is reached on loopback.
++  s.game_address = copy_address ? copy_address : 0x7F000001;
++  s.configured = true;
++  std::thread(Run).detach();
++}
++
++void ListenForProbes(uint32_t copy_address) {
++  static std::once_flag once;
++  std::call_once(once, [copy_address] {
++    const Native responder = OpenUdp(copy_address, kProbePort);
++    if (responder == kNoSocket) {
++      REXKRNL_ERROR("[online] cannot listen for direct probes on UDP {}", kProbePort);
++      return;
++    }
++    std::thread(AnswerProbes, responder).detach();
++  });
++}
++
++bool Configured() {
++  auto& s = state();
++  std::lock_guard lock(s.mutex);
++  return s.configured;
++}
++
++uint32_t AddressFor(uint64_t peer_xuid, uint32_t direct) {
++  auto& s = state();
++  Route route;
++  uint32_t copy_address;
++  {
++    std::lock_guard lock(s.mutex);
++    if (!s.configured) {
++      return direct;
++    }
++    if (Forced() && s.routes.Get(peer_xuid) == Route::kUndecided) {
++      REXKRNL_INFO("[online] peer {:016X}: relay (forced)", peer_xuid);
++      s.routes.Relayed(peer_xuid);
++    }
++    route = s.routes.Get(peer_xuid);
++    copy_address = s.copy_address;
++  }
++  if (route == Route::kUndecided) {
++    const auto start = Clock::now();
++    const bool answered = ProbeDirect(copy_address, direct);
++    const auto waited =
++        std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start).count();
++    std::lock_guard lock(s.mutex);
++    route = s.routes.Settle(peer_xuid, answered);
++    if (route == Route::kDirect) {
++      REXKRNL_INFO("[online] peer {:016X}: direct at {} (probe answered in {} ms)", peer_xuid,
++                   AddressText(direct), waited);
++    } else {
++      REXKRNL_INFO("[online] peer {:016X}: relay ({} did not answer a direct probe in {} ms)",
++                   peer_xuid, AddressText(direct), waited);
++    }
++  }
++  if (route == Route::kDirect) {
++    return direct;
++  }
++  std::lock_guard lock(s.mutex);
++  s.relaying = true;
++  return AddPeer(s, peer_xuid).value_or(direct);
++}
++
++bool DropsDirect(uint32_t address, uint16_t port) {
++  return REXCVAR_GET(wwe_online_drop_direct) && IsPeerPort(port) && !PeerAt(address);
++}
++
++std::optional<uint64_t> PeerAt(uint32_t address) {
++  if (!IsLoopback(address)) {
++    return std::nullopt;
++  }
++  auto& s = state();
++  std::lock_guard lock(s.mutex);
++  return s.table.XuidAt(address);
++}
++
++}  // namespace rex::kernel::xam::live::relay
+diff --git a/src/kernel/xam/live/relay_protocol.cpp b/src/kernel/xam/live/relay_protocol.cpp
+new file mode 100644
+index 0000000..eb26ae8
+--- /dev/null
++++ b/src/kernel/xam/live/relay_protocol.cpp
+@@ -0,0 +1,203 @@
++/**
++ * @file        relay_protocol.cpp
++ * @brief       The relay's wire format and stand-in addresses (see relay_protocol.h).
++ */
++
++#include <rex/kernel/xam/live/relay_protocol.h>
++
++#include <cstring>
++
++namespace rex::kernel::xam::live::relay {
++
++namespace {
++
++constexpr char kMagic[4] = {'A', 'S', 'R', '1'};
++constexpr char kProbeMagic[4] = {'A', 'S', 'P', '1'};
++enum ProbeType : uint8_t { kProbe = 1, kProbeAnswer = 2 };
++
++std::vector<uint8_t> ProbePacket(ProbeType type, uint64_t nonce) {
++  std::vector<uint8_t> out(kProbeMagic, kProbeMagic + sizeof(kProbeMagic));
++  out.push_back(type);
++  for (int i = 7; i >= 0; --i) {
++    out.push_back(uint8_t(nonce >> (8 * i)));
++  }
++  return out;
++}
++
++std::optional<uint64_t> ParseProbePacket(ProbeType type, const uint8_t* data, size_t size) {
++  if (size != sizeof(kProbeMagic) + 9 || std::memcmp(data, kProbeMagic, sizeof(kProbeMagic)) ||
++      data[4] != type) {
++    return std::nullopt;
++  }
++  uint64_t nonce = 0;
++  for (int i = 0; i < 8; ++i) {
++    nonce = (nonce << 8) | data[5 + i];
++  }
++  return nonce;
++}
++constexpr size_t kHeader = 5;
++enum Type : uint8_t { kHello = 1, kWelcome, kPing, kPong, kSend, kDeliver };
++// 127.200.0.1 .. 127.200.255.254
++constexpr uint32_t kStandIns = 0xFFFE;
++
++std::vector<uint8_t> Packet(Type type) {
++  std::vector<uint8_t> out(kMagic, kMagic + sizeof(kMagic));
++  out.push_back(type);
++  return out;
++}
++
++void Put(std::vector<uint8_t>& out, uint64_t value, int bytes) {
++  for (int i = bytes - 1; i >= 0; --i) {
++    out.push_back(uint8_t(value >> (8 * i)));
++  }
++}
++
++uint64_t Get(const uint8_t* data, int bytes) {
++  uint64_t value = 0;
++  for (int i = 0; i < bytes; ++i) {
++    value = (value << 8) | data[i];
++  }
++  return value;
++}
++
++int HexDigit(char c) {
++  if (c >= '0' && c <= '9') return c - '0';
++  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
++  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
++  return -1;
++}
++
++}  // namespace
++
++std::optional<Token> ParseToken(std::string_view hex) {
++  Token token;
++  if (hex.size() != token.size() * 2) {
++    return std::nullopt;
++  }
++  for (size_t i = 0; i < token.size(); ++i) {
++    const int high = HexDigit(hex[2 * i]), low = HexDigit(hex[2 * i + 1]);
++    if (high < 0 || low < 0) {
++      return std::nullopt;
++    }
++    token[i] = uint8_t(high << 4 | low);
++  }
++  return token;
++}
++
++std::vector<uint8_t> Hello(uint64_t xuid, const Token& token) {
++  auto out = Packet(kHello);
++  Put(out, xuid, 8);
++  out.insert(out.end(), token.begin(), token.end());
++  return out;
++}
++
++std::vector<uint8_t> Ping(uint64_t stamp) {
++  auto out = Packet(kPing);
++  Put(out, stamp, 8);
++  return out;
++}
++
++std::vector<uint8_t> Send(uint64_t to, uint16_t src, uint16_t dst, const uint8_t* payload,
++                          size_t size) {
++  auto out = Packet(kSend);
++  Put(out, to, 8);
++  Put(out, src, 2);
++  Put(out, dst, 2);
++  if (size) {
++    out.insert(out.end(), payload, payload + size);
++  }
++  return out;
++}
++
++std::optional<Message> Parse(const uint8_t* data, size_t size) {
++  if (size < kHeader + 8 || std::memcmp(data, kMagic, sizeof(kMagic)) != 0) {
++    return std::nullopt;
++  }
++  Message message{};
++  message.value = Get(data + kHeader, 8);
++  switch (data[4]) {
++    case kWelcome:
++      message.kind = Message::kWelcome;
++      return size == kHeader + 8 ? std::optional(message) : std::nullopt;
++    case kPong:
++      message.kind = Message::kPong;
++      return size == kHeader + 8 ? std::optional(message) : std::nullopt;
++    case kDeliver:
++      if (size < kHeader + 12) {
++        return std::nullopt;
++      }
++      message.kind = Message::kDeliver;
++      message.src_port = uint16_t(Get(data + kHeader + 8, 2));
++      message.dst_port = uint16_t(Get(data + kHeader + 10, 2));
++      message.payload = data + kHeader + 12;
++      message.size = size - kHeader - 12;
++      return message;
++    default:
++      return std::nullopt;
++  }
++}
++
++std::optional<uint32_t> PeerTable::Add(uint64_t xuid,
++                                       const std::function<bool(uint32_t)>& usable) {
++  if (const auto found = by_xuid_.find(xuid); found != by_xuid_.end()) {
++    return found->second;
++  }
++  for (uint32_t i = 0; i < kStandIns; ++i) {
++    const uint32_t address = kFirstStandIn + i;
++    if (by_address_.count(address) || !usable(address)) {
++      continue;
++    }
++    by_xuid_[xuid] = address;
++    by_address_[address] = xuid;
++    return address;
++  }
++  return std::nullopt;
++}
++
++std::optional<uint64_t> PeerTable::XuidAt(uint32_t stand_in) const {
++  const auto found = by_address_.find(stand_in);
++  return found == by_address_.end() ? std::nullopt : std::optional(found->second);
++}
++
++std::vector<uint8_t> Probe(uint64_t nonce) {
++  return ProbePacket(kProbe, nonce);
++}
++
++std::vector<uint8_t> ProbeAnswer(uint64_t nonce) {
++  return ProbePacket(kProbeAnswer, nonce);
++}
++
++std::optional<uint64_t> ParseProbe(const uint8_t* data, size_t size) {
++  return ParseProbePacket(kProbe, data, size);
++}
++
++std::optional<uint64_t> ParseProbeAnswer(const uint8_t* data, size_t size) {
++  return ParseProbePacket(kProbeAnswer, data, size);
++}
++
++Route RouteTable::Get(uint64_t xuid) const {
++  const auto found = routes_.find(xuid);
++  return found == routes_.end() ? Route::kUndecided : found->second;
++}
++
++Route RouteTable::Settle(uint64_t xuid, bool answered) {
++  auto& route = routes_[xuid];
++  if (route == Route::kUndecided) {
++    route = answered ? Route::kDirect : Route::kRelay;
++  }
++  return route;
++}
++
++void RouteTable::Relayed(uint64_t xuid) {
++  auto& route = routes_[xuid];
++  if (route == Route::kUndecided) {
++    route = Route::kRelay;
++  }
++}
++
++std::optional<uint32_t> PeerTable::StandInFor(uint64_t xuid) const {
++  const auto found = by_xuid_.find(xuid);
++  return found == by_xuid_.end() ? std::nullopt : std::optional(found->second);
++}
++
++}  // namespace rex::kernel::xam::live::relay
+diff --git a/src/kernel/xam/live/session_data.cpp b/src/kernel/xam/live/session_data.cpp
+new file mode 100644
+index 0000000..1ea80dd
+--- /dev/null
++++ b/src/kernel/xam/live/session_data.cpp
+@@ -0,0 +1,394 @@
++/**
++ * @file        session_data.cpp
++ * @brief       Xbox LIVE session data (see session_data.h).
++ *
++ * After the Xenia netplay fork's XSession::FillSessionSearchResult, GetSessions and
++ * XLiveAPI::XSessionCreate/SessionSearch (src/xenia/kernel/xsession.cc, XLiveAPI.cpp;
++ * Copyright 2026 Xenia Canary, BSD license).
++ */
++
++#include <rex/kernel/xam/live/session_data.h>
++
++#include <rex/kernel/xam/live/identity.h>
++#include <rex/kernel/xam/live/xlive_json.h>
++
++#include <cstring>
++
++#include <fmt/format.h>
++#include <rapidjson/document.h>
++#include <rapidjson/stringbuffer.h>
++#include <rapidjson/writer.h>
++
++namespace rex::kernel::xam::live {
++
++namespace {
++
++constexpr char kBase64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++
++std::string Base64(const std::vector<uint8_t>& data) {
++  std::string out;
++  for (size_t i = 0; i < data.size(); i += 3) {
++    const uint32_t n = (uint32_t(data[i]) << 16) |
++                       (i + 1 < data.size() ? uint32_t(data[i + 1]) << 8 : 0) |
++                       (i + 2 < data.size() ? data[i + 2] : 0);
++    out += kBase64[(n >> 18) & 63];
++    out += kBase64[(n >> 12) & 63];
++    out += i + 1 < data.size() ? kBase64[(n >> 6) & 63] : '=';
++    out += i + 2 < data.size() ? kBase64[n & 63] : '=';
++  }
++  return out;
++}
++
++std::vector<uint8_t> Unbase64(std::string_view text) {
++  std::vector<uint8_t> out;
++  uint32_t bits = 0;
++  int count = 0;
++  for (char c : text) {
++    const char* at = std::strchr(kBase64, c);
++    if (c == '=' || !c || !at) {
++      continue;
++    }
++    bits = (bits << 6) | uint32_t(at - kBase64);
++    if (++count == 4) {
++      out.push_back(uint8_t(bits >> 16));
++      out.push_back(uint8_t(bits >> 8));
++      out.push_back(uint8_t(bits));
++      bits = 0;
++      count = 0;
++    }
++  }
++  if (count == 3) {
++    out.push_back(uint8_t(bits >> 10));
++    out.push_back(uint8_t(bits >> 2));
++  } else if (count == 2) {
++    out.push_back(uint8_t(bits >> 4));
++  }
++  return out;
++}
++
++uint64_t ReadBe(const std::vector<uint8_t>& value) {
++  uint64_t n = 0;
++  for (uint8_t b : value) {
++    n = (n << 8) | b;
++  }
++  return n;
++}
++
++std::vector<uint8_t> WriteBe(uint64_t n, size_t size) {
++  std::vector<uint8_t> out(size);
++  for (size_t i = 0; i < size; ++i) {
++    out[size - 1 - i] = uint8_t(n >> (8 * i));
++  }
++  return out;
++}
++
++size_t NumberSize(uint8_t type) {
++  switch (type) {
++    case kUserDataInt32:
++    case kUserDataFloat:
++    case kUserDataContext:
++      return 4;
++    case kUserDataInt64:
++    case kUserDataDouble:
++    case kUserDataDateTime:
++      return 8;
++    default:
++      return 0;
++  }
++}
++
++void Put32(std::vector<uint8_t>& b, size_t at, uint32_t v) {
++  b[at] = uint8_t(v >> 24);
++  b[at + 1] = uint8_t(v >> 16);
++  b[at + 2] = uint8_t(v >> 8);
++  b[at + 3] = uint8_t(v);
++}
++
++}  // namespace
++
++UserProperty GuestProperty(uint32_t id, const uint8_t* data, uint32_t size) {
++  // The bytes stay as the guest gave them: the game sets 4-byte values on its 8-byte
++  // (int64) properties 0x2000000D-0F and reads them back as 32-bit numbers.
++  UserProperty p;
++  p.id = id;
++  p.type = uint8_t((id >> 28) & 0xF);
++  p.value.assign(data, data + size);
++  return p;
++}
++
++std::string SessionJson(const SessionRecord& s, uint32_t user_index) {
++  rapidjson::StringBuffer buffer;
++  rapidjson::Writer<rapidjson::StringBuffer> w(buffer);
++  w.StartObject();
++  w.Key("sessionId");
++  w.String(fmt::format("{:016x}", s.session_id).c_str());
++  w.Key("xuid");
++  w.String(fmt::format("{:016X}", s.host_xuid).c_str());
++  w.Key("flags");
++  w.Uint(s.flags);
++  w.Key("publicSlotsCount");
++  w.Uint(s.public_slots);
++  w.Key("privateSlotsCount");
++  w.Uint(s.private_slots);
++  w.Key("userIndex");
++  w.Uint(user_index);
++  w.Key("hostAddress");
++  w.String(s.host_address.c_str());
++  w.Key("localAddress");
++  w.String(s.local_address.c_str());
++  w.Key("macAddress");
++  w.String(MacText(s.mac).c_str());
++  w.Key("port");
++  w.Uint(s.port);
++  w.Key("buildId");
++  w.String(s.build_id.c_str());
++  w.EndObject();
++  return buffer.GetString();
++}
++
++namespace {
++
++void WriteContexts(rapidjson::Writer<rapidjson::StringBuffer>& w,
++                   const std::vector<UserContext>& contexts) {
++  w.StartArray();
++  for (const auto& c : contexts) {
++    w.StartObject();
++    w.Key("id");
++    w.Uint(c.id);
++    w.Key("value");
++    w.Uint(c.value);
++    w.EndObject();
++  }
++  w.EndArray();
++}
++
++}  // namespace
++
++std::string PropertiesJson(const std::vector<UserContext>& contexts,
++                           const std::vector<UserProperty>& properties) {
++  rapidjson::StringBuffer buffer;
++  rapidjson::Writer<rapidjson::StringBuffer> w(buffer);
++  w.StartObject();
++  w.Key("contexts");
++  WriteContexts(w, contexts);
++  w.Key("properties");
++  w.StartArray();
++  for (const auto& p : properties) {
++    w.StartObject();
++    w.Key("id");
++    w.Uint(p.id);
++    w.Key("type");
++    w.Uint(p.type);
++    w.Key("bytes");
++    w.String(Base64(p.value).c_str());
++    w.EndObject();
++  }
++  w.EndArray();
++  w.EndObject();
++  return buffer.GetString();
++}
++
++std::string SearchJson(uint32_t search_index, uint32_t results, uint32_t users,
++                       uint64_t searcher_xuid, const std::string& build_id,
++                       const std::vector<UserContext>& contexts) {
++  rapidjson::StringBuffer buffer;
++  rapidjson::Writer<rapidjson::StringBuffer> w(buffer);
++  w.StartObject();
++  w.Key("searchIndex");
++  w.Uint(search_index);
++  w.Key("resultsCount");
++  w.Uint(results);
++  w.Key("numUsers");
++  w.Uint(users);
++  w.Key("searcher_xuid");
++  w.String(fmt::format("{:016X}", searcher_xuid).c_str());
++  w.Key("buildId");
++  w.String(build_id.c_str());
++  w.Key("contexts");
++  WriteContexts(w, contexts);
++  w.EndObject();
++  return buffer.GetString();
++}
++
++namespace {
++
++uint32_t GetUint(const rapidjson::Value& o, const char* key) {
++  return o.HasMember(key) && o[key].IsUint() ? o[key].GetUint() : 0;
++}
++
++std::string GetString(const rapidjson::Value& o, const char* key) {
++  return o.HasMember(key) && o[key].IsString() ? o[key].GetString() : "";
++}
++
++SessionRecord ParseSession(const rapidjson::Value& o) {
++  SessionRecord s;
++  try {
++    s.session_id = std::stoull(GetString(o, "sessionId"), nullptr, 16);
++    s.host_xuid = std::stoull(GetString(o, "xuid"), nullptr, 16);
++  } catch (...) {
++  }
++  s.flags = GetUint(o, "flags");
++  s.public_slots = GetUint(o, "publicSlotsCount");
++  s.private_slots = GetUint(o, "privateSlotsCount");
++  s.open_public = GetUint(o, "openPublicSlotsCount");
++  s.open_private = GetUint(o, "openPrivateSlotsCount");
++  s.filled_public = GetUint(o, "filledPublicSlotsCount");
++  s.filled_private = GetUint(o, "filledPrivateSlotsCount");
++  s.host_address = GetString(o, "hostAddress");
++  s.local_address = GetString(o, "localAddress");
++  if (const auto mac = ParseMac(GetString(o, "macAddress"))) {
++    s.mac = *mac;
++  }
++  s.port = uint16_t(GetUint(o, "port"));
++  s.build_id = GetString(o, "buildId");
++  if (o.HasMember("contexts") && o["contexts"].IsArray()) {
++    for (const auto& c : o["contexts"].GetArray()) {
++      if (c.IsObject()) {
++        s.contexts.push_back({GetUint(c, "id"), GetUint(c, "value")});
++      }
++    }
++  }
++  if (o.HasMember("properties") && o["properties"].IsArray()) {
++    for (const auto& j : o["properties"].GetArray()) {
++      if (!j.IsObject()) {
++        continue;
++      }
++      UserProperty p;
++      p.id = GetUint(j, "id");
++      p.type = uint8_t(GetUint(j, "type"));
++      const size_t number = NumberSize(p.type);
++      if (number && j.HasMember("int") && j["int"].IsInt64()) {
++        p.value = WriteBe(uint64_t(j["int"].GetInt64()), number);
++      } else if (number && j.HasMember("double") && j["double"].IsNumber()) {
++        const double d = j["double"].GetDouble();
++        if (p.type == kUserDataFloat) {
++          const float f = float(d);
++          uint32_t bits;
++          std::memcpy(&bits, &f, 4);
++          p.value = WriteBe(bits, 4);
++        } else {
++          uint64_t bits;
++          std::memcpy(&bits, &d, 8);
++          p.value = WriteBe(bits, 8);
++        }
++      } else {
++        p.value = Unbase64(GetString(j, "bytes"));
++      }
++      s.properties.push_back(std::move(p));
++    }
++  }
++  return s;
++}
++
++}  // namespace
++
++std::vector<SessionRecord> ParseSessions(std::string_view body) {
++  rapidjson::Document doc;
++  doc.Parse(body.data(), body.size());
++  std::vector<SessionRecord> sessions;
++  if (doc.HasParseError()) {
++    return sessions;
++  }
++  if (doc.IsObject()) {
++    sessions.push_back(ParseSession(doc));
++  } else if (doc.IsArray()) {
++    for (const auto& o : doc.GetArray()) {
++      if (o.IsObject()) {
++        sessions.push_back(ParseSession(o));
++      }
++    }
++  }
++  return sessions;
++}
++
++void WriteSessionInfo(uint8_t* out, uint64_t session_id, uint32_t local_address,
++                      uint32_t public_address, const std::array<uint8_t, 6>& mac,
++                      uint16_t port) {
++  std::memset(out, 0, 0x3C);
++  for (int i = 0; i < 8; ++i) {
++    out[i] = uint8_t(session_id >> (56 - 8 * i));
++  }
++  for (int i = 0; i < 4; ++i) {
++    out[8 + i] = uint8_t(local_address >> (24 - 8 * i));    // ina
++    out[12 + i] = uint8_t(public_address >> (24 - 8 * i));  // inaOnline
++  }
++  out[16] = uint8_t(port >> 8);  // wPortOnline
++  out[17] = uint8_t(port);
++  std::memcpy(out + 18, mac.data(), 6);  // abEnet
++  out[24 + 16] = 1;                      // abOnline: SGADDR platform type, Xbox 360
++  for (int i = 0; i < 16; ++i) {
++    out[44 + i] = uint8_t(i);  // keyExchangeKey (the fork's constant XNKEY)
++  }
++}
++
++std::vector<uint8_t> PackSearchResults(const std::vector<SessionRecord>& sessions,
++                                       uint32_t guest_base, uint32_t buffer_size) {
++  constexpr size_t kHeader = 8, kResult = 0x5C, kContext = 8, kProperty = 0x18;
++  auto align8 = [](size_t n) { return (n + 7) & ~size_t(7); };
++  auto extra = [](const SessionRecord& s) {
++    size_t n = 0;
++    for (const auto& p : s.properties) {
++      if (!NumberSize(p.type)) {
++        n += (p.value.size() + 7) & ~size_t(7);
++      }
++    }
++    return n;
++  };
++  // How many sessions fit, with all their data.
++  size_t count = 0, tail = 0;
++  for (; count < sessions.size(); ++count) {
++    const auto& s = sessions[count];
++    const size_t more = align8(s.contexts.size() * kContext) +
++                        align8(s.properties.size() * kProperty) + extra(s);
++    if (align8(kHeader + (count + 1) * kResult) + tail + more > buffer_size) {
++      break;
++    }
++    tail += more;
++  }
++  std::vector<uint8_t> out(align8(kHeader + count * kResult) + tail);
++  Put32(out, 0, uint32_t(count));
++  Put32(out, 4, count ? guest_base + uint32_t(kHeader) : 0);
++  size_t cursor = align8(kHeader + count * kResult);
++  for (size_t i = 0; i < count; ++i) {
++    const auto& s = sessions[i];
++    const size_t r = kHeader + i * kResult;
++    const uint32_t public_address = ParseIPv4(s.host_address).value_or(0);
++    WriteSessionInfo(&out[r], s.session_id, ParseIPv4(s.local_address).value_or(public_address),
++                     public_address, s.mac, s.port);
++    Put32(out, r + 60, s.open_public);
++    Put32(out, r + 64, s.open_private);
++    Put32(out, r + 68, s.filled_public);
++    Put32(out, r + 72, s.filled_private);
++    Put32(out, r + 76, uint32_t(s.properties.size()));
++    Put32(out, r + 80, uint32_t(s.contexts.size()));
++
++    Put32(out, r + 88, s.contexts.empty() ? 0 : guest_base + uint32_t(cursor));
++    for (const auto& c : s.contexts) {
++      Put32(out, cursor, c.id);
++      Put32(out, cursor + 4, c.value);
++      cursor += kContext;
++    }
++    cursor = align8(cursor);
++
++    const size_t properties = cursor;
++    Put32(out, r + 84, s.properties.empty() ? 0 : guest_base + uint32_t(properties));
++    cursor = align8(cursor + s.properties.size() * kProperty);
++    for (size_t j = 0; j < s.properties.size(); ++j) {
++      const auto& p = s.properties[j];
++      const size_t at = properties + j * kProperty;
++      Put32(out, at, p.id);
++      out[at + 8] = p.type;
++      if (NumberSize(p.type)) {
++        std::memcpy(&out[at + 16], p.value.data(), std::min<size_t>(p.value.size(), 8));
++      } else {
++        Put32(out, at + 16, uint32_t(p.value.size()));
++        Put32(out, at + 20, guest_base + uint32_t(cursor));
++        std::memcpy(&out[cursor], p.value.data(), p.value.size());
++        cursor += (p.value.size() + 7) & ~size_t(7);
++      }
++    }
++  }
++  return out;
++}
++
++}  // namespace rex::kernel::xam::live
+diff --git a/src/kernel/xam/live/upnp.cpp b/src/kernel/xam/live/upnp.cpp
+new file mode 100644
+index 0000000..703c8f6
+--- /dev/null
++++ b/src/kernel/xam/live/upnp.cpp
+@@ -0,0 +1,189 @@
++/**
++ * @file        upnp.cpp
++ * @brief       --wwe_online_upnp: the game's peer ports mapped on the router (see upnp.h).
++ *
++ * After the Xenia netplay fork's UPnP::DiscoverValidIGD, AddPort and RemovePort
++ * (src/xenia/kernel/upnp.cc, Copyright 2026 Xenia Canary, BSD license).
++ */
++
++#include <rex/kernel/xam/live/upnp.h>
++
++#include <chrono>
++#include <cstdlib>
++#include <iterator>
++#include <mutex>
++#include <string>
++#include <thread>
++
++#include <miniupnpc.h>
++#include <upnpcommands.h>
++
++#include <rex/kernel/xam/live/addressing.h>
++#include <rex/kernel/xam/live/relay_protocol.h>
++#include <rex/logging.h>
++
++REXCVAR_DEFINE_BOOL(wwe_online_upnp, false, "Kernel",
++                    "Online play: map the game's peer ports on the router with UPnP, so "
++                    "players elsewhere can reach this PC directly");
++
++namespace rex::kernel::xam::live::upnp {
++
++namespace {
++
++constexpr uint16_t kGamePorts[] = {kPeerPorts[0], kPeerPorts[1], relay::kProbePort};
++// External ports tried per game port (CandidateExternalPort) when the router refuses one.
++constexpr int kAttempts = 4;
++constexpr const char* kLeaseSeconds = "3600";
++constexpr auto kRefreshEvery = std::chrono::minutes(45);
++constexpr const char* kDescription = "WWE All Stars recomp";
++// UPnP IGD error codes.
++constexpr int kConflictInMappingEntry = 718;
++constexpr int kOnlyPermanentLeasesSupported = 725;
++
++struct Router {
++  std::mutex mutex;
++  bool found = false;
++  bool permanent = false;  // the router takes only leases without an end
++  UPNPUrls urls{};
++  IGDdatas data{};
++  char lan_address[64] = {};
++  PortMap mapped;
++};
++
++Router& router() {
++  static Router r;
++  return r;
++}
++
++// The caller holds the router's lock.
++int Add(Router& r, uint16_t game_port, uint16_t external_port) {
++  const auto external = std::to_string(external_port);
++  const auto internal = std::to_string(game_port);
++  int result = UPNP_AddPortMapping(r.urls.controlURL, r.data.first.servicetype,
++                                   external.c_str(), internal.c_str(), r.lan_address,
++                                   kDescription, "UDP", nullptr,
++                                   r.permanent ? "0" : kLeaseSeconds);
++  if (result == kOnlyPermanentLeasesSupported) {
++    r.permanent = true;
++    result = UPNP_AddPortMapping(r.urls.controlURL, r.data.first.servicetype, external.c_str(),
++                                 internal.c_str(), r.lan_address, kDescription, "UDP", nullptr,
++                                 "0");
++  }
++  return result;
++}
++
++// Re-adding a mapping renews its lease.
++void RefreshLeases() {
++  for (;;) {
++    std::this_thread::sleep_for(kRefreshEvery);
++    auto& r = router();
++    std::lock_guard lock(r.mutex);
++    if (r.permanent) {
++      return;
++    }
++    for (const auto& [game_port, external_port] : r.mapped) {
++      if (const int result = Add(r, game_port, external_port); result != UPNPCOMMAND_SUCCESS) {
++        REXKRNL_WARN("[online] UPnP: renewing UDP {} failed ({})", external_port, result);
++      }
++    }
++  }
++}
++
++// The caller holds the router's lock.
++void RemoveLocked(Router& r) {
++  if (!r.found) {
++    return;
++  }
++  for (const auto& [game_port, external_port] : r.mapped) {
++    const auto external = std::to_string(external_port);
++    const int result = UPNP_DeletePortMapping(r.urls.controlURL, r.data.first.servicetype,
++                                              external.c_str(), "UDP", nullptr);
++    if (result == UPNPCOMMAND_SUCCESS) {
++      REXKRNL_INFO("[online] UPnP: removed UDP {}", external_port);
++    } else {
++      REXKRNL_WARN("[online] UPnP: removing UDP {} failed ({})", external_port, result);
++    }
++  }
++  r.mapped.clear();
++  FreeUPNPUrls(&r.urls);
++  r.found = false;
++}
++
++void Map() {
++  auto& r = router();
++  std::lock_guard lock(r.mutex);
++  int error = 0;
++  UPNPDev* devices = upnpDiscover(2000, nullptr, nullptr, 0, 0, 2, &error);
++  if (!devices) {
++    REXKRNL_WARN("[online] UPnP: no router answered (error {})", error);
++    return;
++  }
++  char wan_address[64] = {};
++  const int status = UPNP_GetValidIGD(devices, &r.urls, &r.data, r.lan_address,
++                                      sizeof(r.lan_address), wan_address, sizeof(wan_address));
++  freeUPNPDevlist(devices);
++  if (status != UPNP_CONNECTED_IGD && status != UPNP_PRIVATEIP_IGD) {
++    REXKRNL_WARN("[online] UPnP: no connected internet gateway (status {})", status);
++    if (status != UPNP_NO_IGD) {
++      FreeUPNPUrls(&r.urls);
++    }
++    return;
++  }
++  r.found = true;
++  REXKRNL_INFO("[online] UPnP: router at {} (this PC {}, public address {})",
++               r.urls.controlURL ? r.urls.controlURL : "?", r.lan_address, wan_address);
++  for (const uint16_t game_port : kGamePorts) {
++    for (int attempt = 0; attempt < kAttempts; ++attempt) {
++      const uint16_t external_port = CandidateExternalPort(game_port, attempt);
++      const int result = Add(r, game_port, external_port);
++      if (result == UPNPCOMMAND_SUCCESS) {
++        r.mapped[game_port] = external_port;
++        REXKRNL_INFO("[online] UPnP: UDP {} -> {}:{}{}", external_port, r.lan_address,
++                     game_port, r.permanent ? " (permanent lease)" : "");
++        break;
++      }
++      if (result != kConflictInMappingEntry) {
++        REXKRNL_WARN("[online] UPnP: mapping UDP {} failed ({})", external_port, result);
++        break;
++      }
++    }
++  }
++  if (r.mapped.size() != std::size(kGamePorts)) {
++    // A reachable probe port would vouch for game ports the router refused.
++    REXKRNL_WARN("[online] UPnP: not every port could be mapped, so none is used");
++    RemoveLocked(r);
++    return;
++  }
++  std::atexit(RemoveMappings);
++  std::thread(RefreshLeases).detach();
++}
++
++}  // namespace
++
++bool Enabled() {
++  return REXCVAR_GET(wwe_online_upnp);
++}
++
++PortMap MapPorts() {
++  if (!Enabled()) {
++    return {};
++  }
++  static std::once_flag once;
++  std::call_once(once, Map);
++  auto& r = router();
++  std::lock_guard lock(r.mutex);
++  return r.mapped;
++}
++
++void RemoveMappings() {
++  auto& r = router();
++  std::lock_guard lock(r.mutex);
++  RemoveLocked(r);
++}
++
++PeerPorts& Peers() {
++  static PeerPorts peers;
++  return peers;
++}
++
++}  // namespace rex::kernel::xam::live::upnp
+diff --git a/src/kernel/xam/live/xlive_json.cpp b/src/kernel/xam/live/xlive_json.cpp
+new file mode 100644
+index 0000000..d692964
+--- /dev/null
++++ b/src/kernel/xam/live/xlive_json.cpp
+@@ -0,0 +1,195 @@
++/**
++ * @file        xlive_json.cpp
++ * @brief       XWS JSON (see xlive_json.h).
++ *
++ * Shapes from the Xenia netplay fork (src/xenia/kernel/json/player_object_json.cc,
++ * XLiveAPI.cpp GetServers/Getwhoami), Copyright 2026 Xenia Canary, BSD license.
++ */
++
++#include <rex/kernel/xam/live/xlive_json.h>
++
++#include <rex/kernel/xam/live/identity.h>
++
++#include <cstdio>
++#include <cstdlib>
++
++#include <fmt/format.h>
++#include <rapidjson/document.h>
++#include <rapidjson/stringbuffer.h>
++#include <rapidjson/writer.h>
++
++namespace rex::kernel::xam::live {
++
++std::string ApiBaseUrl(std::string_view server) {
++  std::string url(server);
++  if (url.find("://") == std::string::npos) {
++    url = "http://" + url;
++    const size_t host = url.find("://") + 3;
++    if (url.find(':', host) == std::string::npos) {
++      const size_t slash = url.find('/', host);
++      url.insert(slash == std::string::npos ? url.size() : slash, ":36000");
++    }
++  }
++  while (!url.empty() && url.back() == '/') {
++    url.pop_back();
++  }
++  return url + "/";
++}
++
++std::optional<uint32_t> ParseIPv4(std::string_view text) {
++  unsigned a = 0, b = 0, c = 0, d = 0;
++  char tail = 0;
++  const std::string s(text);
++  if (std::sscanf(s.c_str(), "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) != 4 || a > 255 ||
++      b > 255 || c > 255 || d > 255) {
++    return std::nullopt;
++  }
++  return (a << 24) | (b << 16) | (c << 8) | d;
++}
++
++std::optional<std::string> ParseWhoami(std::string_view body) {
++  rapidjson::Document doc;
++  doc.Parse(body.data(), body.size());
++  if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("address") ||
++      !doc["address"].IsString()) {
++    return std::nullopt;
++  }
++  return std::string(doc["address"].GetString());
++}
++
++std::string PlayerJson(const PlayerRecord& player) {
++  rapidjson::StringBuffer buffer;
++  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
++  writer.StartObject();
++  writer.Key("xuid");
++  writer.String(fmt::format("{:016X}", player.xuid).c_str());
++  writer.Key("machineId");
++  writer.String(fmt::format("{:016x}", player.machine_id).c_str());
++  writer.Key("hostAddress");
++  writer.String(player.host_address.c_str());
++  writer.Key("localAddress");
++  writer.String(player.local_address.c_str());
++  writer.Key("gamertag");
++  writer.String(player.gamertag.c_str());
++  writer.Key("macAddress");
++  writer.String(MacText(player.mac).c_str());
++  if (!player.build_id.empty()) {
++    writer.Key("buildId");
++    writer.String(player.build_id.c_str());
++  }
++  writer.Key("gameVersion");
++  writer.String(kGameVersion);
++  if (!player.mapped_ports.empty()) {
++    writer.Key("mappedPorts");
++    writer.StartObject();
++    for (const auto& [game, external] : player.mapped_ports) {
++      writer.Key(std::to_string(game).c_str());
++      writer.Uint(external);
++    }
++    writer.EndObject();
++  }
++  writer.Key("settings");
++  writer.StartObject();
++  writer.EndObject();
++  writer.EndObject();
++  return buffer.GetString();
++}
++
++std::optional<Registration> ParseRegistration(std::string_view body) {
++  rapidjson::Document doc;
++  doc.Parse(body.data(), body.size());
++  if (doc.HasParseError() || !doc.IsObject()) {
++    return std::nullopt;
++  }
++  Registration registration;
++  if (doc.HasMember("relayAddress") && doc["relayAddress"].IsString()) {
++    registration.relay_address = doc["relayAddress"].GetString();
++  }
++  if (doc.HasMember("relayToken") && doc["relayToken"].IsString()) {
++    registration.relay_token = doc["relayToken"].GetString();
++  }
++  if (doc.HasMember("reachable") && doc["reachable"].IsBool()) {
++    registration.reachable = doc["reachable"].GetBool();
++  }
++  return registration;
++}
++
++std::optional<std::string> ParseRefusal(std::string_view body) {
++  rapidjson::Document doc;
++  doc.Parse(body.data(), body.size());
++  if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("message") || !doc["message"].IsString()) {
++    return std::nullopt;
++  }
++  return std::string(doc["message"].GetString());
++}
++
++std::optional<PlayerRecord> ParsePlayer(std::string_view body) {
++  rapidjson::Document doc;
++  doc.Parse(body.data(), body.size());
++  if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("xuid") ||
++      !doc["xuid"].IsString()) {
++    return std::nullopt;
++  }
++  PlayerRecord player;
++  try {
++    player.xuid = std::stoull(doc["xuid"].GetString(), nullptr, 16);
++    if (doc.HasMember("machineId") && doc["machineId"].IsString()) {
++      player.machine_id = std::stoull(doc["machineId"].GetString(), nullptr, 16);
++    }
++  } catch (...) {
++    return std::nullopt;
++  }
++  if (doc.HasMember("localAddress") && doc["localAddress"].IsString()) {
++    player.local_address = doc["localAddress"].GetString();
++  }
++  if (doc.HasMember("hostAddress") && doc["hostAddress"].IsString()) {
++    player.host_address = doc["hostAddress"].GetString();
++  }
++  if (doc.HasMember("gamertag") && doc["gamertag"].IsString()) {
++    player.gamertag = doc["gamertag"].GetString();
++  }
++  if (doc.HasMember("macAddress") && doc["macAddress"].IsString()) {
++    if (const auto mac = ParseMac(doc["macAddress"].GetString())) {
++      player.mac = *mac;
++    }
++  }
++  if (doc.HasMember("mappedPorts") && doc["mappedPorts"].IsObject()) {
++    for (const auto& entry : doc["mappedPorts"].GetObject()) {
++      const int game = std::atoi(entry.name.GetString());
++      if (game > 0 && game <= 0xFFFF && entry.value.IsUint() && entry.value.GetUint() <= 0xFFFF) {
++        player.mapped_ports[uint16_t(game)] = uint16_t(entry.value.GetUint());
++      }
++    }
++  }
++  return player;
++}
++
++std::vector<TitleServer> ParseTitleServers(std::string_view body) {
++  rapidjson::Document doc;
++  doc.Parse(body.data(), body.size());
++  std::vector<TitleServer> servers;
++  if (doc.HasParseError() || !doc.IsArray()) {
++    return servers;
++  }
++  for (const auto& entry : doc.GetArray()) {
++    if (!entry.IsObject() || !entry.HasMember("address") || !entry["address"].IsString()) {
++      continue;
++    }
++    const auto address = ParseIPv4(entry["address"].GetString());
++    if (!address) {
++      continue;
++    }
++    TitleServer server;
++    server.address = *address;
++    if (entry.HasMember("flags") && entry["flags"].IsInt()) {
++      server.flags = uint32_t(entry["flags"].GetInt());
++    }
++    if (entry.HasMember("description") && entry["description"].IsString()) {
++      server.description = entry["description"].GetString();
++    }
++    servers.push_back(std::move(server));
++  }
++  return servers;
++}
++
++}  // namespace rex::kernel::xam::live
+diff --git a/src/kernel/xam/live/xsession.cpp b/src/kernel/xam/live/xsession.cpp
+new file mode 100644
+index 0000000..fbe167c
+--- /dev/null
++++ b/src/kernel/xam/live/xsession.cpp
+@@ -0,0 +1,489 @@
++/**
++ * @file        xsession.cpp
++ * @brief       Xbox LIVE sessions against the game server (see xsession.h).
++ *
++ * Ported in part from the Xenia netplay fork's XSession and XLiveAPI session calls
++ * (src/xenia/kernel/xsession.cc, XLiveAPI.cpp; Copyright 2026 Xenia Canary, BSD license).
++ */
++
++#include <rex/kernel/xam/live/xsession.h>
++
++#include <algorithm>
++#include <cstring>
++#include <fstream>
++#include <mutex>
++#include <random>
++
++#include <fmt/format.h>
++
++#include <rex/kernel/xam/live/http.h>
++#include <rex/kernel/xam/live/live.h>
++#include <rex/logging.h>
++#include <rex/memory.h>
++#include <rex/string/utf8.h>
++#include <rex/system/kernel_state.h>
++
++#include "crypto/sha256.h"
++
++#if REX_PLATFORM_WIN32
++#include <windows.h>
++#endif
++
++namespace rex::kernel::xam::live {
++
++using namespace rex::system;
++
++namespace {
++
++constexpr uint32_t kMaxUsers = 4;
++constexpr uint32_t kSessionHost = 0x01;  // XSESSION_CREATE_HOST
++constexpr uint32_t kContextGameType = 0x800A;
++constexpr uint32_t kContextGameMode = 0x800B;
++constexpr uint8_t kXnkidOnlinePeer = 0x80;
++constexpr uint16_t kPlayerPort = 36000;  // XNADDR wPortOnline, as the fork reports it
++
++struct UserData {
++  std::mutex mutex;
++  std::map<uint32_t, uint32_t> contexts[kMaxUsers];
++  std::map<uint32_t, UserProperty> properties[kMaxUsers];
++};
++
++UserData& user_data() {
++  static UserData data;
++  return data;
++}
++
++std::string ApiUrl(const std::string& endpoint) {
++  return ApiBaseUrl(REXCVAR_GET(wwe_online_server)) +
++         fmt::format("title/{:08X}/{}", REX_KERNEL_STATE()->title_id(), endpoint);
++}
++
++std::string AddressText(uint32_t address) {
++  return fmt::format("{}.{}.{}.{}", address >> 24, (address >> 16) & 0xFF,
++                     (address >> 8) & 0xFF, address & 0xFF);
++}
++
++uint64_t Random64() {
++  static std::mutex mutex;
++  static std::mt19937_64 random(std::random_device{}() ^
++                                uint64_t(std::chrono::steady_clock::now().time_since_epoch().count()));
++  std::lock_guard lock(mutex);
++  return random();
++}
++
++object_ref<XSession> SessionAt(uint32_t obj_ptr) {
++  if (!obj_ptr) {
++    return nullptr;
++  }
++  const uint32_t handle =
++      memory::load_and_swap<uint32_t>(REX_KERNEL_MEMORY()->TranslateVirtual(obj_ptr));
++  return REX_KERNEL_OBJECTS()->LookupObject<XSession>(handle);
++}
++
++uint32_t ContextValue(uint32_t user_index, uint32_t id) {
++  auto& d = user_data();
++  std::lock_guard lock(d.mutex);
++  if (user_index >= kMaxUsers) {
++    return 0;
++  }
++  const auto it = d.contexts[user_index].find(id);
++  return it == d.contexts[user_index].end() ? 0 : it->second;
++}
++
++void PostJson(const std::string& endpoint, const std::string& body, const char* what) {
++  const auto response = HttpRequest("POST", ApiUrl(endpoint), body);
++  if (response.status != 201) {
++    REXKRNL_ERROR("[online] {} failed (HTTP {})", what, response.status);
++  }
++}
++
++// The host advertises the contexts and properties its user set, plus its name.
++void UploadProperties(const XSession& session) {
++  auto properties = UserProperties(session.user_index_host);
++  UserProperty hostname;
++  hostname.id = 0x40008109;  // XPROPERTY_GAMER_HOSTNAME
++  hostname.type = kUserDataWString;
++  for (char16_t c : rex::string::to_utf16(Gamertag())) {
++    hostname.value.push_back(uint8_t(c >> 8));
++    hostname.value.push_back(uint8_t(c));
++  }
++  hostname.value.insert(hostname.value.end(), {0, 0});
++  properties.push_back(hostname);
++  PostJson(fmt::format("sessions/{:016x}/properties", session.session_id),
++           PropertiesJson(UserContexts(session.user_index_host), properties),
++           "session properties");
++}
++
++}  // namespace
++
++void SetUserContext(uint32_t user_index, uint32_t id, uint32_t value) {
++  auto& d = user_data();
++  std::lock_guard lock(d.mutex);
++  if (user_index < kMaxUsers) {
++    d.contexts[user_index][id] = value;
++  }
++}
++
++void SetUserProperty(uint32_t user_index, const UserProperty& property) {
++  auto& d = user_data();
++  std::lock_guard lock(d.mutex);
++  if (user_index < kMaxUsers) {
++    d.properties[user_index][property.id] = property;
++  }
++}
++
++std::vector<UserContext> UserContexts(uint32_t user_index) {
++  auto& d = user_data();
++  std::lock_guard lock(d.mutex);
++  std::vector<UserContext> out;
++  if (user_index < kMaxUsers) {
++    for (const auto& [id, value] : d.contexts[user_index]) {
++      out.push_back({id, value});
++    }
++  }
++  return out;
++}
++
++std::vector<UserProperty> UserProperties(uint32_t user_index) {
++  auto& d = user_data();
++  std::lock_guard lock(d.mutex);
++  std::vector<UserProperty> out;
++  if (user_index < kMaxUsers) {
++    for (const auto& [id, property] : d.properties[user_index]) {
++      out.push_back(property);
++    }
++  }
++  return out;
++}
++
++const std::string& BuildId() {
++  static const std::string id = [] {
++    std::filesystem::path exe;
++#if REX_PLATFORM_WIN32
++    wchar_t path[MAX_PATH * 4];
++    const DWORD n = GetModuleFileNameW(nullptr, path, DWORD(std::size(path)));
++    exe = std::filesystem::path(std::wstring(path, n));
++#else
++    exe = std::filesystem::read_symlink("/proc/self/exe");
++#endif
++    std::ifstream in(exe, std::ios::binary);
++    sha256::SHA256 sha;
++    std::vector<char> chunk(1 << 20);
++    while (in) {
++      in.read(chunk.data(), std::streamsize(chunk.size()));
++      sha.add(chunk.data(), size_t(in.gcount()));
++    }
++    const std::string hash = sha.getHash();
++    REXKRNL_INFO("[online] build ID {} ({})", hash, exe.filename().string());
++    return hash;
++  }();
++  return id;
++}
++
++XSession::XSession(KernelState* kernel_state) : XObject(kernel_state, kObjectType) {}
++
++X_STATUS XSession::Initialize() {
++  auto* native = CreateNative(4);
++  if (!native) {
++    return X_STATUS_NO_MEMORY;
++  }
++  memory::store_and_swap<uint32_t>(native, handle());
++  return X_STATUS_SUCCESS;
++}
++
++uint32_t XSession::FilledPublic() const {
++  return uint32_t(std::count_if(members.begin(), members.end(),
++                                [](const auto& m) { return !m.second.is_private; }));
++}
++
++uint32_t XSession::FilledPrivate() const {
++  return uint32_t(members.size()) - FilledPublic();
++}
++
++X_RESULT CreateSessionHandle(uint32_t* handle_out) {
++  auto session = object_ref<XSession>(new XSession(REX_KERNEL_STATE()));
++  const X_STATUS status = session->Initialize();
++  if (XFAILED(status)) {
++    return status;
++  }
++  *handle_out = session->handle();
++  return X_ERROR_SUCCESS;
++}
++
++X_RESULT SessionObjectByHandle(uint32_t handle, uint32_t* guest_object_out) {
++  auto session = REX_KERNEL_OBJECTS()->LookupObject<XSession>(handle);
++  if (!session) {
++    return X_STATUS_INVALID_HANDLE;
++  }
++  session->RetainHandle();
++  *guest_object_out = session->guest_object();
++  return X_ERROR_SUCCESS;
++}
++
++X_RESULT SessionCreate(uint32_t obj_ptr, uint32_t flags, uint32_t public_slots,
++                       uint32_t private_slots, uint32_t user_index, uint32_t session_info_ptr,
++                       uint32_t nonce_ptr) {
++  auto session = SessionAt(obj_ptr);
++  if (!session) {
++    return X_ERROR_FUNCTION_FAILED;
++  }
++  std::lock_guard lock(session->mutex);
++  if (session->created) {
++    return X_ERROR_FUNCTION_FAILED;
++  }
++  auto* memory = REX_KERNEL_MEMORY();
++  uint8_t* info = memory->TranslateVirtual(session_info_ptr);
++  session->created = true;
++  session->flags = flags;
++  session->max_public = public_slots;
++  session->max_private = private_slots;
++  session->game_type = ContextValue(user_index, kContextGameType);
++  session->game_mode = ContextValue(user_index, kContextGameMode);
++  session->nonce = Random64();
++  if (nonce_ptr) {
++    memory::store_and_swap<uint64_t>(memory->TranslateVirtual(nonce_ptr), session->nonce);
++  }
++
++  if (flags & kSessionHost) {
++    session->host = true;
++    session->user_index_host = user_index;
++    session->session_id = (uint64_t(kXnkidOnlinePeer) << 56) | (Random64() & 0x00FFFFFFFFFFFFFFull);
++    WriteSessionInfo(info, session->session_id, LocalAddress(), OnlineAddress(), Mac(),
++                     kPlayerPort);
++    SessionRecord record;
++    record.session_id = session->session_id;
++    record.host_xuid = OnlineXuid();
++    record.flags = flags;
++    record.public_slots = public_slots;
++    record.private_slots = private_slots;
++    record.host_address = AddressText(OnlineAddress());
++    record.local_address = AddressText(LocalAddress());
++    record.mac = Mac();
++    record.port = kPlayerPort;
++    record.build_id = BuildId();
++    PostJson("sessions", SessionJson(record, user_index), "session create");
++    UploadProperties(*session);
++    REXKRNL_INFO("[online] hosting session {:016X} (flags {:X}, {} public, {} private)",
++                 session->session_id, flags, public_slots, private_slots);
++  } else {
++    // Joining: the game passes the XSESSION_INFO a search returned.
++    for (int i = 0; i < 8; ++i) {
++      session->session_id = (session->session_id << 8) | info[i];
++    }
++    REXKRNL_INFO("[online] joining session {:016X}", session->session_id);
++  }
++  std::memcpy(session->info.data(), info, session->info.size());
++  return X_ERROR_SUCCESS;
++}
++
++X_RESULT SessionDelete(uint32_t obj_ptr) {
++  auto session = SessionAt(obj_ptr);
++  if (!session) {
++    return X_ERROR_INVALID_PARAMETER;
++  }
++  std::lock_guard lock(session->mutex);
++  if (session->deleted) {
++    return X_ERROR_SUCCESS;
++  }
++  session->deleted = true;
++  if (session->host) {
++    const auto response =
++        HttpRequest("DELETE", ApiUrl(fmt::format("sessions/{:016x}", session->session_id)));
++    if (response.status != 200) {
++      REXKRNL_ERROR("[online] session delete failed (HTTP {})", response.status);
++    }
++  }
++  REXKRNL_INFO("[online] deleted session {:016X}", session->session_id);
++  return X_ERROR_SUCCESS;
++}
++
++X_RESULT SessionModify(uint32_t obj_ptr, uint32_t flags, uint32_t public_slots,
++                       uint32_t private_slots) {
++  auto session = SessionAt(obj_ptr);
++  if (!session) {
++    return X_ERROR_INVALID_PARAMETER;
++  }
++  std::lock_guard lock(session->mutex);
++  // Only the modifier flags change; the creation flags (host, uses) stay.
++  constexpr uint32_t kModifiers = 0x0F80;
++  session->flags = (session->flags & ~kModifiers) | (flags & kModifiers);
++  session->max_public = public_slots;
++  session->max_private = private_slots;
++  if (session->host) {
++    PostJson(fmt::format("sessions/{:016x}/modify", session->session_id),
++             fmt::format(R"({{"flags":{},"publicSlotsCount":{},"privateSlotsCount":{}}})",
++                         session->flags, public_slots, private_slots),
++             "session modify");
++  }
++  return X_ERROR_SUCCESS;
++}
++
++X_RESULT SessionStart(uint32_t obj_ptr) {
++  if (auto session = SessionAt(obj_ptr)) {
++    std::lock_guard lock(session->mutex);
++    session->state = 2;  // XSESSION_STATE in game
++  }
++  return X_ERROR_SUCCESS;
++}
++
++X_RESULT SessionEnd(uint32_t obj_ptr) {
++  if (auto session = SessionAt(obj_ptr)) {
++    std::lock_guard lock(session->mutex);
++    session->state = 0;  // back in the lobby
++  }
++  return X_ERROR_SUCCESS;
++}
++
++X_RESULT SessionJoin(uint32_t obj_ptr, uint32_t count, uint32_t xuids_ptr, uint32_t indices_ptr,
++                     uint32_t private_ptr) {
++  auto session = SessionAt(obj_ptr);
++  if (!session) {
++    return X_ERROR_INVALID_PARAMETER;
++  }
++  std::lock_guard lock(session->mutex);
++  auto* memory = REX_KERNEL_MEMORY();
++  const bool local = xuids_ptr == 0;
++  std::vector<std::pair<uint64_t, bool>> joined;
++  for (uint32_t i = 0; i < count; ++i) {
++    XSession::Member member;
++    member.local = local;
++    if (local) {
++      member.user_index =
++          memory::load_and_swap<uint32_t>(memory->TranslateVirtual(indices_ptr + i * 4));
++      member.xuid = OnlineXuid();
++    } else {
++      member.xuid = memory::load_and_swap<uint64_t>(memory->TranslateVirtual(xuids_ptr + i * 8));
++    }
++    member.is_private =
++        private_ptr &&
++        memory::load_and_swap<uint32_t>(memory->TranslateVirtual(private_ptr + i * 4)) &&
++        session->FilledPrivate() < session->max_private;
++    if (session->members.contains(member.xuid)) {
++      continue;
++    }
++    session->members[member.xuid] = member;
++    joined.emplace_back(member.xuid, member.is_private);
++    REXKRNL_INFO("[online] {} {:016X} joined session {:016X} ({} slot)",
++                 local ? "local" : "remote", member.xuid, session->session_id,
++                 member.is_private ? "private" : "public");
++  }
++  if (session->host && !joined.empty()) {
++    std::string xuids, privates;
++    for (const auto& [xuid, is_private] : joined) {
++      xuids += fmt::format("{}\"{:016X}\"", xuids.empty() ? "" : ",", xuid);
++      privates += fmt::format("{}{}", privates.empty() ? "" : ",", is_private ? "true" : "false");
++    }
++    PostJson(fmt::format("sessions/{:016x}/join", session->session_id),
++             fmt::format(R"({{"xuids":[{}],"privateSlots":[{}]}})", xuids, privates),
++             "session join");
++  }
++  return X_ERROR_SUCCESS;
++}
++
++X_RESULT SessionLeave(uint32_t obj_ptr, uint32_t count, uint32_t xuids_ptr,
++                      uint32_t indices_ptr) {
++  auto session = SessionAt(obj_ptr);
++  if (!session) {
++    return X_ERROR_INVALID_PARAMETER;
++  }
++  std::lock_guard lock(session->mutex);
++  auto* memory = REX_KERNEL_MEMORY();
++  std::string xuids;
++  for (uint32_t i = 0; i < count; ++i) {
++    const uint64_t xuid =
++        xuids_ptr ? memory::load_and_swap<uint64_t>(memory->TranslateVirtual(xuids_ptr + i * 8))
++                  : OnlineXuid();
++    if (session->members.erase(xuid)) {
++      xuids += fmt::format("{}\"{:016X}\"", xuids.empty() ? "" : ",", xuid);
++      REXKRNL_INFO("[online] {:016X} left session {:016X}", xuid, session->session_id);
++    }
++  }
++  if (session->host && !xuids.empty()) {
++    PostJson(fmt::format("sessions/{:016x}/leave", session->session_id),
++             fmt::format(R"({{"xuids":[{}]}})", xuids), "session leave");
++  }
++  return X_ERROR_SUCCESS;
++}
++
++X_RESULT SessionDetails(uint32_t obj_ptr, uint32_t size_ptr, uint32_t details_ptr) {
++  auto session = SessionAt(obj_ptr);
++  if (!session || !details_ptr) {
++    return X_ERROR_INVALID_PARAMETER;
++  }
++  std::lock_guard lock(session->mutex);
++  auto* memory = REX_KERNEL_MEMORY();
++  const uint32_t buffer_size =
++      size_ptr ? memory::load_and_swap<uint32_t>(memory->TranslateVirtual(size_ptr)) : 0x80;
++  constexpr uint32_t kDetails = 0x80, kMember = 0x10;
++  if (buffer_size < kDetails) {
++    return X_ERROR_INSUFFICIENT_BUFFER;
++  }
++  // XSESSION_LOCAL_DETAILS, then as many XSESSION_MEMBERs as fit.
++  uint8_t* d = memory->TranslateVirtual(details_ptr);
++  std::memset(d, 0, kDetails);
++  auto put = [&](uint32_t at, uint32_t v) { memory::store_and_swap<uint32_t>(d + at, v); };
++  put(0, session->host ? session->user_index_host : 0xFE);
++  put(4, session->game_type);
++  put(8, session->game_mode);
++  put(12, session->flags);
++  put(16, session->max_public);
++  put(20, session->max_private);
++  put(24, session->max_public - std::min(session->max_public, session->FilledPublic()));
++  put(28, session->max_private - std::min(session->max_private, session->FilledPrivate()));
++  const uint32_t local_members = uint32_t(std::count_if(
++      session->members.begin(), session->members.end(), [](const auto& m) { return m.second.local; }));
++  put(32, local_members);
++  const uint32_t fits = (buffer_size - kDetails) / kMember;
++  const uint32_t returned = std::min<uint32_t>(fits, uint32_t(session->members.size()));
++  put(36, returned);
++  put(40, session->state);
++  memory::store_and_swap<uint64_t>(d + 48, session->nonce);
++  std::memcpy(d + 56, session->info.data(), session->info.size());
++  put(124, returned ? details_ptr + kDetails : 0);
++  uint32_t i = 0;
++  for (const auto& [xuid, member] : session->members) {
++    if (i == returned) {
++      break;
++    }
++    uint8_t* m = d + kDetails + i * kMember;
++    memory::store_and_swap<uint64_t>(m, xuid);
++    memory::store_and_swap<uint32_t>(m + 8, member.user_index);
++    memory::store_and_swap<uint32_t>(m + 12, member.is_private ? 1 : 0);
++    ++i;
++  }
++  return X_ERROR_SUCCESS;
++}
++
++X_RESULT SessionSearch(uint32_t search_index, uint32_t user_index, uint32_t max_results,
++                       uint32_t num_contexts, uint32_t contexts_ptr, uint32_t buffer_size,
++                       uint32_t results_ptr, uint32_t num_users) {
++  if (!SignedIn()) {
++    return X_ERROR_FUNCTION_FAILED;
++  }
++  auto* memory = REX_KERNEL_MEMORY();
++  std::vector<UserContext> contexts;
++  for (uint32_t i = 0; i < num_contexts && contexts_ptr; ++i) {
++    const uint8_t* c = memory->TranslateVirtual(contexts_ptr + i * 8);
++    contexts.push_back({memory::load_and_swap<uint32_t>(c), memory::load_and_swap<uint32_t>(c + 4)});
++  }
++  const auto response = HttpRequest(
++      "POST", ApiUrl("sessions/search"),
++      SearchJson(search_index, max_results, std::max<uint32_t>(1, num_users), OnlineXuid(),
++                 BuildId(), contexts));
++  std::vector<SessionRecord> sessions;
++  if (response.status == 201) {
++    sessions = ParseSessions(response.body);
++  } else {
++    REXKRNL_ERROR("[online] session search failed (HTTP {})", response.status);
++  }
++  if (sessions.size() > max_results) {
++    sessions.resize(max_results);
++  }
++  const auto packed = PackSearchResults(sessions, results_ptr, buffer_size);
++  std::memcpy(memory->TranslateVirtual(results_ptr), packed.data(), packed.size());
++  REXKRNL_INFO("[online] session search {} found {} session(s)", search_index,
++               memory::load_and_swap<uint32_t>(packed.data()));
++  return X_ERROR_SUCCESS;
++}
++
++}  // namespace rex::kernel::xam::live
+diff --git a/src/kernel/xam/xam_enum.cpp b/src/kernel/xam/xam_enum.cpp
+index 9dcab94..3647190 100644
+--- a/src/kernel/xam/xam_enum.cpp
++++ b/src/kernel/xam/xam_enum.cpp
+@@ -9,7 +9,11 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <cstring>
++
++#include <rex/kernel/xam/live/live.h>
+ #include <rex/kernel/xam/module.h>
++#include <rex/kernel/xam/net_trace.h>
+ #include <rex/kernel/xam/private.h>
+ #include <rex/logging.h>
+ #include <rex/hook.h>
+@@ -83,9 +87,41 @@ u32 XamEnumerate_entry(u32 handle, u32 flags, mapped_void buffer, u32 buffer_len
+   return result;
+ }
+ 
+-u32 XamCreateEnumeratorHandle_entry(u32 unk1, u32 unk2, u32 unk3, u32 unk4, u32 unk5, u32 unk6,
+-                                    u32 unk7, u32 unk8) {
+-  return X_ERROR_INVALID_PARAMETER;
++u32 XamCreateEnumeratorHandle_entry(u32 user_index, u32 app_id, u32 open_message,
++                                    u32 close_message, u32 extra_size, u32 item_count, u32 flags,
++                                    mapped_u32 handle_out) {
++  // Signed in to Live, XTitleServerCreateEnumerator (XLiveBase 0x58039, the Live list of LSP
++  // title servers) lists the game server's Rendez-Vous address (after the Xenia netplay
++  // fork's XLiveBaseApp, BSD license).
++  constexpr uint32_t kXLiveBase = 0xFC;
++  constexpr uint32_t kTitleServerEnumerate = 0x58039;
++  constexpr size_t kTitleServerInfoSize = 0xD0;  // XTITLE_SERVER_INFO
++  if (app_id != kXLiveBase || open_message != kTitleServerEnumerate || !handle_out ||
++      !live::SignedIn()) {
++    return X_ERROR_INVALID_PARAMETER;
++  }
++  auto e = make_object<XStaticUntypedEnumerator>(REX_KERNEL_STATE(), item_count,
++                                                 kTitleServerInfoSize);
++  void* extra = nullptr;
++  auto result =
++      e->Initialize(user_index, app_id, open_message, close_message, flags, extra_size, &extra);
++  if (XFAILED(result)) {
++    return result;
++  }
++  for (const auto& server : live::TitleServers()) {
++    if (e->item_count() >= item_count) {
++      break;
++    }
++    // inaServer (network order), dwFlags, szServerInfo[200].
++    uint8_t* item = e->AppendItem();
++    std::memset(item, 0, kTitleServerInfoSize);
++    memory::store_and_swap<uint32_t>(item, server.address);
++    memory::store_and_swap<uint32_t>(item + 4, server.flags);
++    std::memcpy(item + 8, server.description.data(),
++                std::min<size_t>(server.description.size(), kTitleServerInfoSize - 9));
++  }
++  *handle_out = e->handle();
++  return X_ERROR_SUCCESS;
+ }
+ 
+ u32 XamGetPrivateEnumStructureFromHandle_entry(u32 handle, mapped_u32 out_object_ptr) {
+@@ -109,7 +145,7 @@ u32 XamGetPrivateEnumStructureFromHandle_entry(u32 handle, mapped_u32 out_object
+ }  // namespace kernel
+ }  // namespace rex
+ 
+-REX_EXPORT(__imp__XamEnumerate, rex::kernel::xam::XamEnumerate_entry)
+-REX_EXPORT(__imp__XamCreateEnumeratorHandle, rex::kernel::xam::XamCreateEnumeratorHandle_entry)
++REX_TRACE_EXPORT(__imp__XamEnumerate, rex::kernel::xam::XamEnumerate_entry)
++REX_TRACE_EXPORT(__imp__XamCreateEnumeratorHandle, rex::kernel::xam::XamCreateEnumeratorHandle_entry)
+ REX_EXPORT(__imp__XamGetPrivateEnumStructureFromHandle,
+            rex::kernel::xam::XamGetPrivateEnumStructureFromHandle_entry)
+diff --git a/src/kernel/xam/xam_misc.cpp b/src/kernel/xam/xam_misc.cpp
+index ff6cb56..12991aa 100644
+--- a/src/kernel/xam/xam_misc.cpp
++++ b/src/kernel/xam/xam_misc.cpp
+@@ -8,6 +8,7 @@
+  *              See LICENSE file in the project root for full license text.
+  */
+ 
++#include <rex/kernel/xam/net_trace.h>
+ #include <rex/kernel/xam/private.h>
+ #include <rex/logging.h>
+ #include <rex/hook.h>
+@@ -243,7 +244,7 @@ REX_EXPORT_STUB(__imp__XNetLogonGetServiceInfo);
+ REX_EXPORT_STUB(__imp__XNetLogonGetServiceNetworkID);
+ REX_EXPORT_STUB(__imp__XNetLogonGetState);
+ REX_EXPORT_STUB(__imp__XNetLogonGetTicketOpt);
+-REX_EXPORT_STUB(__imp__XNetLogonGetTitleID);
++REX_TRACE_EXPORT_STUB(__imp__XNetLogonGetTitleID);
+ REX_EXPORT_STUB(__imp__XNetLogonGetTitleVersion);
+ REX_EXPORT_STUB(__imp__XNetLogonGetUserPrivileges);
+ REX_EXPORT_STUB(__imp__XNetLogonInitOverrideInfo);
+diff --git a/src/kernel/xam/xam_msg.cpp b/src/kernel/xam/xam_msg.cpp
+index 704eb0c..1c23652 100644
+--- a/src/kernel/xam/xam_msg.cpp
++++ b/src/kernel/xam/xam_msg.cpp
+@@ -12,6 +12,7 @@
+ // Disable warnings about unused parameters for kernel functions
+ #pragma GCC diagnostic ignored "-Wunused-parameter"
+ 
++#include <rex/kernel/xam/net_trace.h>
+ #include <rex/kernel/xam/private.h>
+ #include <rex/kernel/xboxkrnl/error.h>
+ #include <rex/logging.h>
+@@ -129,10 +130,10 @@ u32 XamGetOverlappedResult_entry(ppc_ptr_t<XAM_OVERLAPPED> overlapped_ptr, mappe
+ }  // namespace kernel
+ }  // namespace rex
+ 
+-REX_EXPORT(__imp__XMsgInProcessCall, rex::kernel::xam::XMsgInProcessCall_entry)
+-REX_EXPORT(__imp__XMsgSystemProcessCall, rex::kernel::xam::XMsgSystemProcessCall_entry)
+-REX_EXPORT(__imp__XMsgStartIORequestEx, rex::kernel::xam::XMsgStartIORequestEx_entry)
+-REX_EXPORT(__imp__XMsgStartIORequest, rex::kernel::xam::XMsgStartIORequest_entry)
++REX_TRACE_EXPORT(__imp__XMsgInProcessCall, rex::kernel::xam::XMsgInProcessCall_entry)
++REX_TRACE_EXPORT(__imp__XMsgSystemProcessCall, rex::kernel::xam::XMsgSystemProcessCall_entry)
++REX_TRACE_EXPORT(__imp__XMsgStartIORequestEx, rex::kernel::xam::XMsgStartIORequestEx_entry)
++REX_TRACE_EXPORT(__imp__XMsgStartIORequest, rex::kernel::xam::XMsgStartIORequest_entry)
+ REX_EXPORT(__imp__XMsgCancelIORequest, rex::kernel::xam::XMsgCancelIORequest_entry)
+ REX_EXPORT(__imp__XMsgCompleteIORequest, rex::kernel::xam::XMsgCompleteIORequest_entry)
+ REX_EXPORT(__imp__XamGetOverlappedResult, rex::kernel::xam::XamGetOverlappedResult_entry)
+diff --git a/src/kernel/xam/xam_net.cpp b/src/kernel/xam/xam_net.cpp
+index 58e36a4..fa9aa8d 100644
+--- a/src/kernel/xam/xam_net.cpp
++++ b/src/kernel/xam/xam_net.cpp
+@@ -12,14 +12,24 @@
+ // Disable warnings about unused parameters for kernel functions
+ #pragma GCC diagnostic ignored "-Wunused-parameter"
+ 
++#include <algorithm>
++#include <chrono>
+ #include <cstring>
++#include <map>
++#include <set>
++#include <random>
+ 
+ #if REX_PLATFORM_MAC
+ #include <sys/select.h>
+ #endif
+ 
+ #include <rex/chrono/clock.h>
++#include <rex/kernel/xam/live/addressing.h>
++#include <rex/kernel/xam/live/live.h>
++#include <rex/kernel/xam/live/relay.h>
++#include <rex/kernel/xam/live/upnp.h>
+ #include <rex/kernel/xam/module.h>
++#include <rex/kernel/xam/net_trace.h>
+ #include <rex/kernel/xam/private.h>
+ #include <rex/kernel/xboxkrnl/error.h>
+ #include <rex/kernel/xboxkrnl/threading.h>
+@@ -28,9 +38,11 @@
+ #include <rex/types.h>
+ #include <rex/string.h>
+ #include <rex/system/kernel_state.h>
++#include <rex/system/overlapped_receive.h>
+ #include <rex/system/xevent.h>
+ #include <rex/system/xsocket.h>
+ #include <rex/system/xthread.h>
++#include <rex/thread.h>
+ #include <rex/system/xtypes.h>
+ 
+ #if REX_PLATFORM_WIN32
+@@ -44,6 +56,9 @@
+ #include <sys/socket.h>
+ #endif
+ 
++REXCVAR_DEFINE_BOOL(wwe_net_trace, false, "Kernel",
++                    "Log the guest's network, XMsg and session calls (rate-limited)");
++
+ namespace rex {
+ namespace kernel {
+ namespace xam {
+@@ -295,23 +310,167 @@ u32 NetDll_WSAGetLastError_entry() {
+   return XThread::GetLastError();
+ }
+ 
+-u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_ptr,
+-                             u32 buffer_count, mapped_u32 num_bytes_recv, mapped_u32 flags_ptr,
+-                             ppc_ptr_t<XSOCKADDR_IN> from_addr,
+-                             ppc_ptr_t<XWSAOVERLAPPED> overlapped_ptr,
+-                             mapped_void completion_routine_ptr) {
+-  if (overlapped_ptr) {
+-    // auto evt = REX_KERNEL_OBJECTS()->LookupObject<XEvent>(
+-    //    overlapped_ptr->event_handle);
++// --wwe_online_ip: a socket that sends or connects to a peer on this PC without a bind
++// leaves from this copy's address, not the default one.
++void BindToOnlineAddress(XSocket* socket, uint32_t destination) {
++  if (!live::Enabled() || socket->bound()) {
++    return;
++  }
++  const uint32_t address = live::ImplicitBindAddress(destination, live::BindAddress());
++  if (!address) {
++    return;
++  }
++  N_XSOCKADDR_IN name;
++  name.sin_family = AF_INET;
++  name.sin_port = 0;
++  name.sin_addr = address;
++  socket->Bind(&name, sizeof(sockaddr_in));
++}
++
++namespace overlapped {
++
++// What a later attempt of a guest WSARecvFrom needs.
++struct Receive {
++  uint32_t socket;
++  uint32_t buffers_ptr;
++  uint32_t buffer_count;
++  uint32_t from_ptr;
++  uint32_t from_len_ptr;
++};
++
++net::OverlappedReceives<Receive> receives;
++
++// One datagram from the host socket into the guest buffers, or -1 when none is waiting.
++int TryReceive(const Receive& r) {
++  auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(r.socket);
++  if (!socket) {
++    return -1;
++  }
++#if REX_PLATFORM_WIN32
++  const auto native = static_cast<SOCKET>(socket->native_handle());
++#else
++  const auto native = static_cast<int>(socket->native_handle());
++#endif
++  fd_set readable;
++  FD_ZERO(&readable);
++  FD_SET(native, &readable);
++  timeval no_wait{0, 0};
++  if (select(int(native + 1), &readable, nullptr, nullptr, &no_wait) <= 0) {
++    return -1;
++  }
++  // Room for any UDP datagram, so a large one is never cut short here.
++  static thread_local uint8_t data[65536];
++  N_XSOCKADDR_IN from;
++  uint32_t from_len = sizeof(from);
++  const int received = socket->RecvFrom(data, sizeof(data), 0, &from, &from_len);
++  if (received < 0) {
++    return -1;
++  }
++  auto* memory = REX_KERNEL_MEMORY();
++  auto* buffers = memory->TranslateVirtual<XWSABUF*>(r.buffers_ptr);
++  uint32_t copied = 0;
++  for (uint32_t i = 0; i < r.buffer_count && copied < uint32_t(received); ++i) {
++    const uint32_t n = std::min<uint32_t>(buffers[i].len, uint32_t(received) - copied);
++    std::memcpy(memory->TranslateVirtual(buffers[i].buf_ptr), data + copied, n);
++    copied += n;
++  }
++  if (r.from_ptr) {
++    auto* out = memory->TranslateVirtual<XSOCKADDR_IN*>(r.from_ptr);
++    out->sin_family = from.sin_family;
++    // A peer's mapped router port reaches the game as its game port.
++    out->sin_port = live::upnp::Peers().Game(from.sin_addr, from.sin_port);
++    out->sin_addr = from.sin_addr;
++    std::memset(out->x_sin_zero, 0, sizeof(out->x_sin_zero));
++  }
++  if (r.from_len_ptr) {
++    memory::store_and_swap<uint32_t>(memory->TranslateVirtual(r.from_len_ptr), 16);
++  }
++  return int(copied);
++}
+ 
+-    // if (evt) {
+-    //  //evt->Set(0, false);
+-    //}
++// The OVERLAPPED of a finished operation: status, size, and its event signalled.
++void Complete(uint32_t overlapped_ptr, uint32_t bytes) {
++  auto* overlapped = REX_KERNEL_MEMORY()->TranslateVirtual<XWSAOVERLAPPED*>(overlapped_ptr);
++  overlapped->internal = 0;
++  overlapped->internal_high = bytes;
++  if (overlapped->event_handle) {
++    xboxkrnl::xeNtSetEvent(overlapped->event_handle, nullptr);
+   }
++}
+ 
+-  // we're not going to be receiving packets any time soon
+-  // return error so we don't wait on that - Cancerous
+-  return -1;
++}  // namespace overlapped
++
++// A receive that finds no datagram stays pending (WSA_IO_PENDING) when it has an
++// OVERLAPPED; WSAGetOverlappedResult then polls the host socket for it.
++u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket_handle, u32 buffers_ptr, u32 buffer_count,
++                             mapped_u32 num_bytes_recv, mapped_u32 flags_ptr, u32 from_ptr,
++                             u32 from_len_ptr, u32 overlapped_ptr, u32 completion_routine) {
++  if (!REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket_handle)) {
++    XThread::SetLastError(0x2736);  // WSAENOTSOCK
++    return -1;
++  }
++  using Status = decltype(overlapped::receives)::Status;
++  const overlapped::Receive request{socket_handle, buffers_ptr, buffer_count, from_ptr,
++                                    from_len_ptr};
++  const auto outcome = overlapped::receives.Start(overlapped_ptr, request, overlapped::TryReceive);
++  switch (outcome.status) {
++    case Status::kCompleted:
++      if (num_bytes_recv) {
++        *num_bytes_recv = uint32_t(outcome.bytes);
++      }
++      if (flags_ptr) {
++        *flags_ptr = 0;
++      }
++      if (overlapped_ptr) {
++        overlapped::Complete(overlapped_ptr, uint32_t(outcome.bytes));
++      }
++      XThread::SetLastError(0);
++      return 0;
++    case Status::kPending: {
++      auto* overlapped =
++          REX_KERNEL_MEMORY()->TranslateVirtual<XWSAOVERLAPPED*>(overlapped_ptr);
++      overlapped->internal = X_STATUS_PENDING;
++      if (overlapped->event_handle) {
++        xboxkrnl::xeNtClearEvent(overlapped->event_handle);
++      }
++      XThread::SetLastError(net::kWsaIoPending);
++      return -1;
++    }
++    default:
++      XThread::SetLastError(net::kWsaEWouldBlock);
++      return -1;
++  }
++}
++
++u32 NetDll_WSAGetOverlappedResult_entry(u32 caller, u32 socket_handle, u32 overlapped_ptr,
++                                        mapped_u32 bytes_transferred, u32 wait,
++                                        mapped_u32 flags_ptr) {
++  if (!overlapped_ptr) {
++    XThread::SetLastError(87);  // ERROR_INVALID_PARAMETER
++    return 0;
++  }
++  using Status = decltype(overlapped::receives)::Status;
++  // A wait gives up after 5 s (a closed socket never delivers), as an incomplete result.
++  const auto outcome = overlapped::receives.Poll(
++      overlapped_ptr, wait ? std::chrono::seconds(5) : std::chrono::seconds(0),
++      overlapped::TryReceive, [] { return std::chrono::steady_clock::now(); },
++      [] { rex::thread::Sleep(std::chrono::milliseconds(1)); });
++  if (outcome.status == Status::kIncomplete) {
++    XThread::SetLastError(net::kWsaIoIncomplete);
++    return 0;
++  }
++  if (outcome.status == Status::kCompleted) {
++    overlapped::Complete(overlapped_ptr, uint32_t(outcome.bytes));
++  }
++  // Completed now, or earlier (a receive that completed at once, or a send).
++  auto* overlapped = REX_KERNEL_MEMORY()->TranslateVirtual<XWSAOVERLAPPED*>(overlapped_ptr);
++  if (bytes_transferred) {
++    *bytes_transferred = overlapped->internal_high;
++  }
++  if (flags_ptr) {
++    *flags_ptr = 0;
++  }
++  return 1;
+ }
+ 
+ // If the socket is a VDP socket, buffer 0 is the game data length, and buffer 1
+@@ -320,7 +479,6 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
+                            u32 num_buffers, mapped_u32 num_bytes_sent, u32 flags,
+                            ppc_ptr_t<XSOCKADDR_IN> to_ptr, u32 to_len,
+                            ppc_ptr_t<XWSAOVERLAPPED> overlapped, mapped_void completion_routine) {
+-  assert(!overlapped);
+   assert(!completion_routine);
+ 
+   auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket_handle);
+@@ -346,10 +504,19 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
+   }
+ 
+   N_XSOCKADDR_IN native_to(to_ptr);
+-  socket->SendTo(combined_buffer_mem.data(), combined_buffer_size, flags, &native_to, to_len);
+-
+-  // TODO: Instantly complete overlapped
++  BindToOnlineAddress(socket.get(), native_to.sin_addr);
++  native_to.sin_port = live::upnp::Peers().External(native_to.sin_addr, native_to.sin_port);
++  if (!live::relay::DropsDirect(native_to.sin_addr, native_to.sin_port)) {
++    socket->SendTo(combined_buffer_mem.data(), combined_buffer_size, flags, &native_to, to_len);
++  }
+ 
++  if (num_bytes_sent) {
++    *num_bytes_sent = combined_buffer_size;
++  }
++  // Sends complete at once.
++  if (overlapped) {
++    overlapped::Complete(overlapped.guest_address(), combined_buffer_size);
++  }
+   return 0;
+ }
+ 
+@@ -435,7 +602,83 @@ struct XnAddrStatus {
+   static const uint32_t XNET_GET_XNADDR_TROUBLESHOOT = 0x00008000;
+ };
+ 
++// Keys, addresses and QoS for Player Match peers, after the Xenia netplay fork's
++// xam_net.cc (Copyright 2026 Xenia Canary, BSD license). Players reach each other directly
++// at the addresses the game server sees, so there is no security association to set up:
++// a key is only remembered for XNetInAddrToXnAddr.
++namespace peers {
++std::mutex mutex;
++uint64_t registered_key = 0;  // the last XNKID XNetRegisterKey was given
++
++uint64_t LoadKey(uint32_t guest_xnkid) {
++  return guest_xnkid ? memory::load_and_swap<uint64_t>(REX_KERNEL_MEMORY()->TranslateVirtual(guest_xnkid))
++                     : 0;
++}
++
++// Peers' records from the server, by XUID and by MAC, so each is asked for once; MACs the
++// server doesn't know are remembered too.
++std::map<uint64_t, live::PlayerRecord> known;
++std::set<std::array<uint8_t, 6>> unknown_macs;
++
++std::optional<live::PlayerRecord> PeerByMac(const uint8_t* mac) {
++  {
++    std::lock_guard lock(mutex);
++    for (const auto& [xuid, record] : known) {
++      if (std::memcmp(record.mac.data(), mac, record.mac.size()) == 0) {
++        return record;
++      }
++    }
++  }
++  std::array<uint8_t, 6> key;
++  std::memcpy(key.data(), mac, key.size());
++  {
++    std::lock_guard lock(mutex);
++    if (unknown_macs.count(key)) {
++      return std::nullopt;
++    }
++  }
++  const auto record = live::FindPlayerByMac(key);
++  std::lock_guard lock(mutex);
++  if (record) {
++    known[record->xuid] = *record;
++  } else {
++    unknown_macs.insert(key);
++  }
++  return record;
++}
++
++std::optional<live::PlayerRecord> PeerByXuid(uint64_t xuid) {
++  {
++    std::lock_guard lock(mutex);
++    if (const auto found = known.find(xuid); found != known.end()) {
++      return found->second;
++    }
++  }
++  const auto record = live::FindPlayerByXuid(xuid);
++  if (record) {
++    std::lock_guard lock(mutex);
++    known[xuid] = *record;
++  }
++  return record;
++}
++}  // namespace peers
++
+ u32 NetDll_XNetGetTitleXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
++  // Signed in to Live: the address the game server sees this copy at, and the install's MAC
++  // (after the Xenia netplay fork's XLiveAPI::IpGetConsoleXnAddr, BSD license).
++  if (live::SignedIn()) {
++    addr_ptr.Zero();
++    addr_ptr->ina.s_addr = htonl(live::LocalAddress());
++    addr_ptr->inaOnline.s_addr = htonl(live::OnlineAddress());
++    addr_ptr->wPortOnline = 36000;
++    const auto mac = live::Mac();
++    std::memcpy(addr_ptr->abEnet, mac.data(), mac.size());
++    addr_ptr->abOnline[16] = 1;  // SGADDR platform type: Xbox 360
++    return XnAddrStatus::XNET_GET_XNADDR_ETHERNET | XnAddrStatus::XNET_GET_XNADDR_STATIC |
++           XnAddrStatus::XNET_GET_XNADDR_GATEWAY | XnAddrStatus::XNET_GET_XNADDR_DNS |
++           XnAddrStatus::XNET_GET_XNADDR_ONLINE;
++  }
++
+   // Just return a loopback address atm.
+   addr_ptr->ina.s_addr = htonl(INADDR_LOOPBACK);
+   addr_ptr->inaOnline.s_addr = 0;
+@@ -473,6 +716,14 @@ u32 NetDll_XNetXnAddrToMachineId_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr, m
+ 
+ void NetDll_XNetInAddrToString_entry(u32 caller, u32 in_addr, mapped_string string_out,
+                                      u32 string_size) {
++  if (live::Enabled()) {
++    rex::string::copy_truncating(
++        string_out,
++        fmt::format("{}.{}.{}.{}", in_addr >> 24, (in_addr >> 16) & 0xFF, (in_addr >> 8) & 0xFF,
++                    in_addr & 0xFF),
++        string_size);
++    return;
++  }
+   rex::string::copy_truncating(string_out, "666.666.666.666", string_size);
+ }
+ 
+@@ -480,14 +731,67 @@ void NetDll_XNetInAddrToString_entry(u32 caller, u32 in_addr, mapped_string stri
+ // subsequent socket calls (like a handle to a XNet address)
+ u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mapped_void xid,
+                                     mapped_void in_addr) {
+-  return 1;
++  // Signed in to Live, another player is reached at the address in its XNADDR that suits
++  // (live::PeerAddress), and this copy at its own (after the fork's XNetXnAddrToInAddr).
++  if (!live::SignedIn() || !xn_addr || !in_addr) {
++    return 1;
++  }
++  const auto mac = live::Mac();
++  uint32_t address = live::PeerAddress(ntohl(xn_addr->ina.s_addr),
++                                       ntohl(xn_addr->inaOnline.s_addr), live::OnlineAddress());
++  if (std::memcmp(xn_addr->abEnet, mac.data(), mac.size()) == 0) {
++    address = live::LocalAddress();
++  } else if (const auto peer = peers::PeerByMac(xn_addr->abEnet)) {
++    // Reached at its public address: through the router ports it mapped, if any.
++    if (live::ParseIPv4(peer->host_address) == address) {
++      live::upnp::Peers().Remember(address, peer->mapped_ports);
++    }
++    // Direct when the peer answers a direct probe, else its stand-in address, where the
++    // relay transport listens for it (live::relay::AddressFor).
++    if (live::relay::Configured()) {
++      address = live::relay::AddressFor(peer->xuid, address);
++    }
++  }
++  memory::store_and_swap<uint32_t>(in_addr.host_address(), address);
++  return 0;
+ }
+ 
+ // Does the reverse of the above.
+ // FIXME: Arguments may not be correct.
+-u32 NetDll_XNetInAddrToXnAddr_entry(u32 caller, mapped_void in_addr, ppc_ptr_t<XNADDR> xn_addr,
++u32 NetDll_XNetInAddrToXnAddr_entry(u32 caller, u32 in_addr, ppc_ptr_t<XNADDR> xn_addr,
+                                     mapped_void xid) {
+-  return 1;
++  // Signed in to Live: this copy's XNADDR, or another player's from the server
++  // (players/find gives its MAC); the key is the one XNetRegisterKey was given.
++  if (!live::SignedIn() || !xn_addr) {
++    return 1;
++  }
++  xn_addr.Zero();
++  if (in_addr == live::LocalAddress() || in_addr == live::OnlineAddress() ||
++      in_addr == INADDR_LOOPBACK) {
++    NetDll_XNetGetTitleXnAddr_entry(caller, xn_addr);
++  } else {
++    uint32_t local = in_addr, online = in_addr;
++    const auto relayed_xuid = live::relay::PeerAt(in_addr);
++    const auto player =
++        relayed_xuid ? peers::PeerByXuid(*relayed_xuid) : live::FindPlayer(in_addr);
++    if (player) {
++      online = live::ParseIPv4(player->host_address).value_or(in_addr);
++      local = live::ParseIPv4(player->local_address).value_or(online);
++      std::memcpy(xn_addr->abEnet, player->mac.data(), player->mac.size());
++      if (in_addr == online) {
++        live::upnp::Peers().Remember(in_addr, player->mapped_ports);
++      }
++    }
++    xn_addr->ina.s_addr = htonl(local);
++    xn_addr->inaOnline.s_addr = htonl(online);
++    xn_addr->wPortOnline = 36000;
++    xn_addr->abOnline[16] = 1;  // SGADDR platform type: Xbox 360
++  }
++  if (xid) {
++    std::lock_guard lock(peers::mutex);
++    memory::store_and_swap<uint64_t>(xid.host_address(), peers::registered_key);
++  }
++  return 0;
+ }
+ 
+ // https://www.google.com/patents/WO2008112448A1?cl=en
+@@ -557,11 +861,6 @@ u32 NetDll_XNetQosRelease_entry(u32 caller, ppc_ptr_t<XNQOS> qos) {
+   return 0;
+ }
+ 
+-u32 NetDll_XNetQosListen_entry(u32 caller, mapped_void id, mapped_void data, u32 data_size, u32 r7,
+-                               u32 flags) {
+-  return X_ERROR_FUNCTION_FAILED;
+-}
+-
+ u32 NetDll_inet_addr_entry(mapped_string addr_ptr) {
+   if (!addr_ptr) {
+     return -1;
+@@ -596,6 +895,7 @@ u32 NetDll_socket_entry(u32 caller, u32 af, u32 type, u32 protocol) {
+ }
+ 
+ u32 NetDll_closesocket_entry(u32 caller, u32 socket_handle) {
++  overlapped::receives.Forget(socket_handle);
+   auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket_handle);
+   if (!socket) {
+     // WSAENOTSOCK
+@@ -670,6 +970,13 @@ u32 NetDll_bind_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR_IN> nam
+   }
+ 
+   N_XSOCKADDR_IN native_name(name);
++  // --wwe_online_ip: each copy on one PC keeps its peer ports on its own address.
++  if (live::Enabled()) {
++    const auto target = live::PlanBind(native_name.sin_addr, native_name.sin_port,
++                                       live::BindAddress());
++    native_name.sin_addr = target.address;
++    native_name.sin_port = target.port;
++  }
+   X_STATUS status = socket->Bind(&native_name, namelen);
+   if (XFAILED(status)) {
+     XThread::SetLastError(xboxkrnl::xeRtlNtStatusToDosError(status));
+@@ -688,6 +995,10 @@ u32 NetDll_connect_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR> nam
+   }
+ 
+   N_XSOCKADDR native_name(name);
++  // sa_data: the port, then the IPv4 address, both big-endian.
++  const auto* bytes = reinterpret_cast<const uint8_t*>(native_name.sa_data);
++  BindToOnlineAddress(socket.get(), uint32_t(bytes[2]) << 24 | uint32_t(bytes[3]) << 16 |
++                                        uint32_t(bytes[4]) << 8 | bytes[5]);
+   X_STATUS status = socket->Connect(&native_name, namelen);
+   if (XFAILED(status)) {
+     XThread::SetLastError(xboxkrnl::xeRtlNtStatusToDosError(status));
+@@ -874,7 +1185,7 @@ u32 NetDll_recvfrom_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u3
+ 
+   if (from_ptr) {
+     from_ptr->sin_family = native_from.sin_family;
+-    from_ptr->sin_port = native_from.sin_port;
++    from_ptr->sin_port = live::upnp::Peers().Game(native_from.sin_addr, native_from.sin_port);
+     from_ptr->sin_addr = native_from.sin_addr;
+     std::memset(from_ptr->x_sin_zero, 0, sizeof(from_ptr->x_sin_zero));
+   }
+@@ -916,6 +1227,11 @@ u32 NetDll_sendto_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32
+   }
+ 
+   N_XSOCKADDR_IN native_to(to_ptr);
++  BindToOnlineAddress(socket.get(), native_to.sin_addr);
++  native_to.sin_port = live::upnp::Peers().External(native_to.sin_addr, native_to.sin_port);
++  if (live::relay::DropsDirect(native_to.sin_addr, native_to.sin_port)) {
++    return buf_len;  // as if sent
++  }
+   return socket->SendTo(buf_ptr, buf_len, flags, &native_to, to_len);
+ }
+ 
+@@ -933,170 +1249,349 @@ void NetDll_WSASetLastError_entry(u32 error_code) {
+   XThread::SetLastError(error_code);
+ }
+ 
++// Signed in to Live, an LSP server (the game server's Rendez-Vous) is reached directly,
++// without a security gateway: its secure address is its real address and connecting
++// succeeds at once. Otherwise these fail as the stubs did (r3 = 1).
++u32 NetDll_XNetServerToInAddr_entry(u32 caller, u32 ina, u32 service_id, mapped_u32 out) {
++  if (!live::SignedIn()) {
++    return 1;
++  }
++  if (out) {
++    *out = ina;
++  }
++  return 0;
++}
++
++u32 NetDll_XNetConnect_entry(u32 caller, u32 ina) {
++  return live::SignedIn() ? 0 : 1;
++}
++
++u32 NetDll_XNetGetConnectStatus_entry(u32 caller, u32 ina) {
++  constexpr uint32_t kConnected = 2;  // XNET_CONNECT_STATUS_CONNECTED
++  return live::SignedIn() ? kConnected : 1;
++}
++
++
++// (caller, XNKID* id, XNKEY* key): a system-link style ID and the fork's constant key.
++u32 NetDll_XNetCreateKey_entry(u32 caller, u32 xnkid_ptr, u32 xnkey_ptr) {
++  if (!live::Enabled()) {
++    return 1;
++  }
++  auto* memory = REX_KERNEL_MEMORY();
++  std::random_device random;
++  const uint64_t id = ((uint64_t(random()) << 32) | random()) & 0x00FFFFFFFFFFFFFFull;
++  if (xnkid_ptr) {
++    memory::store_and_swap<uint64_t>(memory->TranslateVirtual(xnkid_ptr), id);
++  }
++  if (xnkey_ptr) {
++    uint8_t* key = memory->TranslateVirtual(xnkey_ptr);
++    for (int i = 0; i < 16; ++i) {
++      key[i] = uint8_t(i);
++    }
++  }
++  return 0;
++}
++
++u32 NetDll_XNetRegisterKey_entry(u32 caller, u32 xnkid_ptr, u32 xnkey_ptr) {
++  if (!live::Enabled()) {
++    return 1;
++  }
++  std::lock_guard lock(peers::mutex);
++  peers::registered_key = peers::LoadKey(xnkid_ptr);
++  REXKRNL_INFO("[online] XNetRegisterKey {:016X}", peers::registered_key);
++  return 0;
++}
++
++u32 NetDll_XNetUnregisterKey_entry(u32 caller, u32 xnkid_ptr) {
++  if (!live::Enabled()) {
++    return 1;
++  }
++  std::lock_guard lock(peers::mutex);
++  if (peers::LoadKey(xnkid_ptr) == peers::registered_key) {
++    peers::registered_key = 0;
++  }
++  return 0;
++}
++
++u32 NetDll_XNetUnregisterInAddr_entry(u32 caller, u32 ina) {
++  return live::Enabled() ? 0 : 1;
++}
++
++// XNQOS: count, count_pending, then one 24-byte XNQOSINFO per target.
++namespace qos {
++constexpr uint8_t kComplete = 0x01, kTargetContacted = 0x02, kDataReceived = 0x08;
++constexpr uint32_t kListenSetData = 0x04;
++constexpr uint32_t kHeader = 8, kInfo = 24;
++}  // namespace qos
++
++// (caller, XNKID* id, data, size, bits per second, flags): with LISTEN_SET_DATA the host's
++// QoS data goes to the server, for searchers' XNetQosLookup.
++u32 NetDll_XNetQosListen_entry(u32 caller, mapped_void id, mapped_void data, u32 data_size, u32 r7,
++                               u32 flags) {
++  if (!live::SignedIn()) {
++    return X_ERROR_FUNCTION_FAILED;
++  }
++  if ((flags & qos::kListenSetData) && data && data_size && id) {
++    const uint64_t session_id = peers::LoadKey(id.guest_address());
++    live::PostQosData(session_id, std::string(reinterpret_cast<const char*>(data.host_address()),
++                                              data_size));
++  }
++  return 0;
++}
++
++// (caller, count, XNADDR** addresses, XNKID** ids, XNKEY** keys, gateways, gateway addresses,
++// service IDs, probes, bits per second, flags, event, XNQOS** out): every target answers at
++// once with the data its host listed and a 10 ms round trip.
++u32 NetDll_XNetQosLookup_entry(u32 caller, u32 count, u32 addresses_ptr, u32 ids_ptr,
++                               u32 keys_ptr, u32 num_gateways, u32 gateways_ptr,
++                               u32 service_ids_ptr, u32 probes, u32 bits_per_second,
++                               u32 flags, u32 event_handle, mapped_u32 qos_out) {
++  if (!qos_out || !live::SignedIn()) {
++    return 0x271D;  // WSAEACCES
++  }
++  auto* memory = REX_KERNEL_MEMORY();
++  const uint32_t targets = count + num_gateways;
++  std::vector<std::string> data(targets);
++  for (uint32_t i = 0; i < count && ids_ptr; ++i) {
++    const uint32_t id_ptr = memory::load_and_swap<uint32_t>(memory->TranslateVirtual(ids_ptr + i * 4));
++    data[i] = live::GetQosData(peers::LoadKey(id_ptr));
++  }
++  uint32_t size = qos::kHeader + targets * qos::kInfo;
++  for (const auto& d : data) {
++    size += uint32_t((d.size() + 7) & ~size_t(7));
++  }
++  const uint32_t qos_ptr = memory->SystemHeapAlloc(size);
++  uint8_t* q = memory->TranslateVirtual(qos_ptr);
++  std::memset(q, 0, size);
++  uint32_t tail = qos::kHeader + targets * qos::kInfo;
++  for (uint32_t i = 0; i < targets; ++i) {
++    uint8_t* info = q + qos::kHeader + i * qos::kInfo;
++    uint8_t info_flags = qos::kComplete | qos::kTargetContacted;
++    if (!data[i].empty()) {
++      info_flags |= qos::kDataReceived;
++      memory::store_and_swap<uint16_t>(info + 6, uint16_t(data[i].size()));
++      memory::store_and_swap<uint32_t>(info + 8, qos_ptr + tail);
++      std::memcpy(q + tail, data[i].data(), data[i].size());
++      tail += uint32_t((data[i].size() + 7) & ~size_t(7));
++    }
++    info[0] = info_flags;
++    memory::store_and_swap<uint16_t>(info + 2, uint16_t(probes));  // probes sent
++    memory::store_and_swap<uint16_t>(info + 4, uint16_t(probes));  // probes received
++    memory::store_and_swap<uint16_t>(info + 12, 10);               // rtt min (ms)
++    memory::store_and_swap<uint16_t>(info + 14, 10);               // rtt median (ms)
++    memory::store_and_swap<uint32_t>(info + 16, 5u << 20);         // up bits/s
++    memory::store_and_swap<uint32_t>(info + 20, 5u << 20);         // down bits/s
++  }
++  memory::store_and_swap<uint32_t>(q, targets);
++  memory::store_and_swap<uint32_t>(q + 4, 0);
++  *qos_out = qos_ptr;
++  if (event_handle) {
++    xboxkrnl::xeNtSetEvent(event_handle, nullptr);
++  }
++  return 0;
++}
++
++// (caller, socket, sockaddr_in*, int* length)
++u32 NetDll_getsockname_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR_IN> name,
++                             mapped_u32 name_len) {
++  auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket_handle);
++  if (!socket) {
++    XThread::SetLastError(0x2736);  // WSAENOTSOCK
++    return -1;
++  }
++  if (!name) {
++    XThread::SetLastError(0x271E);  // WSAEFAULT
++    return -1;
++  }
++  sockaddr_in native{};
++#if REX_PLATFORM_WIN32
++  int native_len = sizeof(native);
++  const int result = getsockname(static_cast<SOCKET>(socket->native_handle()),
++                                 reinterpret_cast<sockaddr*>(&native), &native_len);
++#else
++  socklen_t native_len = sizeof(native);
++  const int result = getsockname(static_cast<int>(socket->native_handle()),
++                                 reinterpret_cast<sockaddr*>(&native), &native_len);
++#endif
++  if (result != 0) {
++    XThread::SetLastError(0x2726);  // WSAEINVAL
++    return -1;
++  }
++  name->sin_family = native.sin_family;
++  name->sin_port = ntohs(native.sin_port);
++  name->sin_addr = ntohl(native.sin_addr.s_addr);
++  std::memset(name->x_sin_zero, 0, sizeof(name->x_sin_zero));
++  if (name_len) {
++    *name_len = 16;
++  }
++  return 0;
++}
++
+ }  // namespace xam
+ }  // namespace kernel
+ }  // namespace rex
+ 
+-REX_EXPORT(__imp__NetDll_XNetStartup, rex::kernel::xam::NetDll_XNetStartup_entry)
+-REX_EXPORT(__imp__NetDll_XNetCleanup, rex::kernel::xam::NetDll_XNetCleanup_entry)
+-REX_EXPORT(__imp__NetDll_XNetGetOpt, rex::kernel::xam::NetDll_XNetGetOpt_entry)
+-REX_EXPORT(__imp__NetDll_XNetRandom, rex::kernel::xam::NetDll_XNetRandom_entry)
+-REX_EXPORT(__imp__NetDll_WSAStartup, rex::kernel::xam::NetDll_WSAStartup_entry)
+-REX_EXPORT(__imp__NetDll_WSACleanup, rex::kernel::xam::NetDll_WSACleanup_entry)
+-REX_EXPORT(__imp__NetDll_WSAGetLastError, rex::kernel::xam::NetDll_WSAGetLastError_entry)
+-REX_EXPORT(__imp__NetDll_WSARecvFrom, rex::kernel::xam::NetDll_WSARecvFrom_entry)
+-REX_EXPORT(__imp__NetDll_WSASendTo, rex::kernel::xam::NetDll_WSASendTo_entry)
+-REX_EXPORT(__imp__NetDll_WSAWaitForMultipleEvents,
+-           rex::kernel::xam::NetDll_WSAWaitForMultipleEvents_entry)
+-REX_EXPORT(__imp__NetDll_WSACreateEvent, rex::kernel::xam::NetDll_WSACreateEvent_entry)
+-REX_EXPORT(__imp__NetDll_WSACloseEvent, rex::kernel::xam::NetDll_WSACloseEvent_entry)
+-REX_EXPORT(__imp__NetDll_WSAResetEvent, rex::kernel::xam::NetDll_WSAResetEvent_entry)
+-REX_EXPORT(__imp__NetDll_WSASetEvent, rex::kernel::xam::NetDll_WSASetEvent_entry)
+-REX_EXPORT(__imp__NetDll_XNetGetTitleXnAddr, rex::kernel::xam::NetDll_XNetGetTitleXnAddr_entry)
+-REX_EXPORT(__imp__NetDll_XNetGetDebugXnAddr, rex::kernel::xam::NetDll_XNetGetDebugXnAddr_entry)
+-REX_EXPORT(__imp__NetDll_XNetXnAddrToMachineId,
+-           rex::kernel::xam::NetDll_XNetXnAddrToMachineId_entry)
+-REX_EXPORT(__imp__NetDll_XNetInAddrToString, rex::kernel::xam::NetDll_XNetInAddrToString_entry)
+-REX_EXPORT(__imp__NetDll_XNetXnAddrToInAddr, rex::kernel::xam::NetDll_XNetXnAddrToInAddr_entry)
+-REX_EXPORT(__imp__NetDll_XNetInAddrToXnAddr, rex::kernel::xam::NetDll_XNetInAddrToXnAddr_entry)
+-REX_EXPORT(__imp__NetDll_XNetSetSystemLinkPort,
+-           rex::kernel::xam::NetDll_XNetSetSystemLinkPort_entry)
+-REX_EXPORT(__imp__NetDll_XNetGetEthernetLinkStatus,
+-           rex::kernel::xam::NetDll_XNetGetEthernetLinkStatus_entry)
+-REX_EXPORT(__imp__NetDll_XNetDnsLookup, rex::kernel::xam::NetDll_XNetDnsLookup_entry)
+-REX_EXPORT(__imp__NetDll_XNetDnsRelease, rex::kernel::xam::NetDll_XNetDnsRelease_entry)
+-REX_EXPORT(__imp__NetDll_XNetQosServiceLookup, rex::kernel::xam::NetDll_XNetQosServiceLookup_entry)
+-REX_EXPORT(__imp__NetDll_XNetQosRelease, rex::kernel::xam::NetDll_XNetQosRelease_entry)
+-REX_EXPORT(__imp__NetDll_XNetQosListen, rex::kernel::xam::NetDll_XNetQosListen_entry)
+-REX_EXPORT(__imp__NetDll_inet_addr, rex::kernel::xam::NetDll_inet_addr_entry)
+-REX_EXPORT(__imp__NetDll_socket, rex::kernel::xam::NetDll_socket_entry)
+-REX_EXPORT(__imp__NetDll_closesocket, rex::kernel::xam::NetDll_closesocket_entry)
+-REX_EXPORT(__imp__NetDll_shutdown, rex::kernel::xam::NetDll_shutdown_entry)
+-REX_EXPORT(__imp__NetDll_setsockopt, rex::kernel::xam::NetDll_setsockopt_entry)
+-REX_EXPORT(__imp__NetDll_ioctlsocket, rex::kernel::xam::NetDll_ioctlsocket_entry)
+-REX_EXPORT(__imp__NetDll_bind, rex::kernel::xam::NetDll_bind_entry)
+-REX_EXPORT(__imp__NetDll_connect, rex::kernel::xam::NetDll_connect_entry)
+-REX_EXPORT(__imp__NetDll_listen, rex::kernel::xam::NetDll_listen_entry)
+-REX_EXPORT(__imp__NetDll_accept, rex::kernel::xam::NetDll_accept_entry)
+-REX_EXPORT(__imp__NetDll_select, rex::kernel::xam::NetDll_select_entry)
+-REX_EXPORT(__imp__NetDll_recv, rex::kernel::xam::NetDll_recv_entry)
+-REX_EXPORT(__imp__NetDll_recvfrom, rex::kernel::xam::NetDll_recvfrom_entry)
+-REX_EXPORT(__imp__NetDll_send, rex::kernel::xam::NetDll_send_entry)
+-REX_EXPORT(__imp__NetDll_sendto, rex::kernel::xam::NetDll_sendto_entry)
+-REX_EXPORT(__imp__NetDll___WSAFDIsSet, rex::kernel::xam::NetDll___WSAFDIsSet_entry)
+-REX_EXPORT(__imp__NetDll_WSASetLastError, rex::kernel::xam::NetDll_WSASetLastError_entry)
+-
+-REX_EXPORT_STUB(__imp__NetDll_UpnpActionCalculateWorkBufferSize);
+-REX_EXPORT_STUB(__imp__NetDll_UpnpActionCreate);
+-REX_EXPORT_STUB(__imp__NetDll_UpnpActionGetResults);
+-REX_EXPORT_STUB(__imp__NetDll_UpnpCleanup);
+-REX_EXPORT_STUB(__imp__NetDll_UpnpCloseHandle);
+-REX_EXPORT_STUB(__imp__NetDll_UpnpDescribeCreate);
+-REX_EXPORT_STUB(__imp__NetDll_UpnpDescribeGetResults);
+-REX_EXPORT_STUB(__imp__NetDll_UpnpDoWork);
+-REX_EXPORT_STUB(__imp__NetDll_UpnpEventCreate);
+-REX_EXPORT_STUB(__imp__NetDll_UpnpEventGetCurrentState);
+-REX_EXPORT_STUB(__imp__NetDll_UpnpEventUnsubscribe);
+-REX_EXPORT_STUB(__imp__NetDll_UpnpSearchCreate);
+-REX_EXPORT_STUB(__imp__NetDll_UpnpSearchGetDevices);
+-REX_EXPORT_STUB(__imp__NetDll_UpnpStartup);
+-REX_EXPORT_STUB(__imp__NetDll_WSACancelOverlappedIO);
+-REX_EXPORT_STUB(__imp__NetDll_WSAEventSelect);
+-REX_EXPORT_STUB(__imp__NetDll_WSAGetOverlappedResult);
+-REX_EXPORT_STUB(__imp__NetDll_WSARecv);
+-REX_EXPORT_STUB(__imp__NetDll_WSASend);
+-REX_EXPORT_STUB(__imp__NetDll_WSAStartupEx);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpCloseHandle);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpConnect);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpCrackUrl);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpCrackUrlW);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpCreateUrl);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpCreateUrlW);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpDoWork);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpGetPerfCounters);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpOpen);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpOpenRequest);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpOpenRequestUsingMemory);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpQueryAuthSchemes);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpQueryHeaders);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpQueryOption);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpReadData);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpReceiveResponse);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpResetPerfCounters);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpSendRequest);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpSetCredentials);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpSetOption);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpSetStatusCallback);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpShutdown);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpStartup);
+-REX_EXPORT_STUB(__imp__NetDll_XHttpWriteData);
+-REX_EXPORT_STUB(__imp__NetDll_XNetConnect);
+-REX_EXPORT_STUB(__imp__NetDll_XNetCreateKey);
+-REX_EXPORT_STUB(__imp__NetDll_XNetDnsReverseLookup);
+-REX_EXPORT_STUB(__imp__NetDll_XNetDnsReverseRelease);
+-REX_EXPORT_STUB(__imp__NetDll_XNetGetBroadcastVersionStatus);
+-REX_EXPORT_STUB(__imp__NetDll_XNetGetConnectStatus);
+-REX_EXPORT_STUB(__imp__NetDll_XNetGetSystemLinkPort);
+-REX_EXPORT_STUB(__imp__NetDll_XNetGetXnAddrPlatform);
+-REX_EXPORT_STUB(__imp__NetDll_XNetInAddrToServer);
+-REX_EXPORT_STUB(__imp__NetDll_XNetQosGetListenStats);
+-REX_EXPORT_STUB(__imp__NetDll_XNetQosLookup);
+-REX_EXPORT_STUB(__imp__NetDll_XNetRegisterKey);
+-REX_EXPORT_STUB(__imp__NetDll_XNetReplaceKey);
+-REX_EXPORT_STUB(__imp__NetDll_XNetServerToInAddr);
+-REX_EXPORT_STUB(__imp__NetDll_XNetSetOpt);
+-REX_EXPORT_STUB(__imp__NetDll_XNetStartupEx);
+-REX_EXPORT_STUB(__imp__NetDll_XNetTsAddrToInAddr);
+-REX_EXPORT_STUB(__imp__NetDll_XNetUnregisterInAddr);
+-REX_EXPORT_STUB(__imp__NetDll_XNetUnregisterKey);
+-REX_EXPORT_STUB(__imp__NetDll_XmlDownloadContinue);
+-REX_EXPORT_STUB(__imp__NetDll_XmlDownloadGetParseTime);
+-REX_EXPORT_STUB(__imp__NetDll_XmlDownloadGetReceivedDataSize);
+-REX_EXPORT_STUB(__imp__NetDll_XmlDownloadStart);
+-REX_EXPORT_STUB(__imp__NetDll_XmlDownloadStop);
+-REX_EXPORT_STUB(__imp__NetDll_XnpCapture);
+-REX_EXPORT_STUB(__imp__NetDll_XnpConfig);
+-REX_EXPORT_STUB(__imp__NetDll_XnpConfigUPnP);
+-REX_EXPORT_STUB(__imp__NetDll_XnpConfigUPnPPortAndExternalAddr);
+-REX_EXPORT_STUB(__imp__NetDll_XnpEthernetInterceptRecv);
+-REX_EXPORT_STUB(__imp__NetDll_XnpEthernetInterceptSetCallbacks);
+-REX_EXPORT_STUB(__imp__NetDll_XnpEthernetInterceptSetExtendedReceiveCallback);
+-REX_EXPORT_STUB(__imp__NetDll_XnpEthernetInterceptXmit);
+-REX_EXPORT_STUB(__imp__NetDll_XnpEthernetInterceptXmitAsIp);
+-REX_EXPORT_STUB(__imp__NetDll_XnpGetActiveSocketList);
+-REX_EXPORT_STUB(__imp__NetDll_XnpGetConfigStatus);
+-REX_EXPORT_STUB(__imp__NetDll_XnpGetKeyList);
+-REX_EXPORT_STUB(__imp__NetDll_XnpGetQosLookupList);
+-REX_EXPORT_STUB(__imp__NetDll_XnpGetSecAssocList);
+-REX_EXPORT_STUB(__imp__NetDll_XnpGetVlanXboxName);
+-REX_EXPORT_STUB(__imp__NetDll_XnpLoadConfigParams);
+-REX_EXPORT_STUB(__imp__NetDll_XnpLoadMachineAccount);
+-REX_EXPORT_STUB(__imp__NetDll_XnpLogonClearChallenge);
+-REX_EXPORT_STUB(__imp__NetDll_XnpLogonClearQEvent);
+-REX_EXPORT_STUB(__imp__NetDll_XnpLogonGetChallenge);
+-REX_EXPORT_STUB(__imp__NetDll_XnpLogonGetQFlags);
+-REX_EXPORT_STUB(__imp__NetDll_XnpLogonGetQVals);
+-REX_EXPORT_STUB(__imp__NetDll_XnpLogonGetStatus);
+-REX_EXPORT_STUB(__imp__NetDll_XnpLogonSetChallengeResponse);
+-REX_EXPORT_STUB(__imp__NetDll_XnpLogonSetPState);
+-REX_EXPORT_STUB(__imp__NetDll_XnpLogonSetQEvent);
+-REX_EXPORT_STUB(__imp__NetDll_XnpLogonSetQFlags);
+-REX_EXPORT_STUB(__imp__NetDll_XnpLogonSetQVals);
+-REX_EXPORT_STUB(__imp__NetDll_XnpNoteSystemTime);
+-REX_EXPORT_STUB(__imp__NetDll_XnpPersistTitleState);
+-REX_EXPORT_STUB(__imp__NetDll_XnpQosHistoryGetAggregateMeasurement);
+-REX_EXPORT_STUB(__imp__NetDll_XnpQosHistoryGetEntries);
+-REX_EXPORT_STUB(__imp__NetDll_XnpQosHistoryLoad);
+-REX_EXPORT_STUB(__imp__NetDll_XnpQosHistorySaveMeasurements);
+-REX_EXPORT_STUB(__imp__NetDll_XnpRegisterKeyForCallerType);
+-REX_EXPORT_STUB(__imp__NetDll_XnpReplaceKeyForCallerType);
+-REX_EXPORT_STUB(__imp__NetDll_XnpSaveConfigParams);
+-REX_EXPORT_STUB(__imp__NetDll_XnpSaveMachineAccount);
+-REX_EXPORT_STUB(__imp__NetDll_XnpSetVlanXboxName);
+-REX_EXPORT_STUB(__imp__NetDll_XnpToolIpProxyInject);
+-REX_EXPORT_STUB(__imp__NetDll_XnpToolSetCallbacks);
+-REX_EXPORT_STUB(__imp__NetDll_XnpUnregisterKeyForCallerType);
+-REX_EXPORT_STUB(__imp__NetDll_XnpUpdateConfigParams);
+-REX_EXPORT_STUB(__imp__NetDll_getpeername);
+-REX_EXPORT_STUB(__imp__NetDll_getsockname);
+-REX_EXPORT_STUB(__imp__NetDll_getsockopt);
++REX_TRACE_EXPORT(__imp__NetDll_XNetStartup, rex::kernel::xam::NetDll_XNetStartup_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetCleanup, rex::kernel::xam::NetDll_XNetCleanup_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetGetOpt, rex::kernel::xam::NetDll_XNetGetOpt_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetRandom, rex::kernel::xam::NetDll_XNetRandom_entry)
++REX_TRACE_EXPORT(__imp__NetDll_WSAStartup, rex::kernel::xam::NetDll_WSAStartup_entry)
++REX_TRACE_EXPORT(__imp__NetDll_WSACleanup, rex::kernel::xam::NetDll_WSACleanup_entry)
++REX_TRACE_EXPORT(__imp__NetDll_WSAGetLastError, rex::kernel::xam::NetDll_WSAGetLastError_entry)
++REX_TRACE_EXPORT(__imp__NetDll_WSARecvFrom, rex::kernel::xam::NetDll_WSARecvFrom_entry)
++REX_TRACE_EXPORT(__imp__NetDll_WSAGetOverlappedResult,
++                 rex::kernel::xam::NetDll_WSAGetOverlappedResult_entry)
++REX_TRACE_EXPORT_SOCKADDR(__imp__NetDll_WSASendTo, rex::kernel::xam::NetDll_WSASendTo_entry, 9)
++REX_TRACE_EXPORT(__imp__NetDll_WSAWaitForMultipleEvents, rex::kernel::xam::NetDll_WSAWaitForMultipleEvents_entry)
++REX_TRACE_EXPORT(__imp__NetDll_WSACreateEvent, rex::kernel::xam::NetDll_WSACreateEvent_entry)
++REX_TRACE_EXPORT(__imp__NetDll_WSACloseEvent, rex::kernel::xam::NetDll_WSACloseEvent_entry)
++REX_TRACE_EXPORT(__imp__NetDll_WSAResetEvent, rex::kernel::xam::NetDll_WSAResetEvent_entry)
++REX_TRACE_EXPORT(__imp__NetDll_WSASetEvent, rex::kernel::xam::NetDll_WSASetEvent_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetGetTitleXnAddr, rex::kernel::xam::NetDll_XNetGetTitleXnAddr_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetGetDebugXnAddr, rex::kernel::xam::NetDll_XNetGetDebugXnAddr_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetXnAddrToMachineId, rex::kernel::xam::NetDll_XNetXnAddrToMachineId_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetInAddrToString, rex::kernel::xam::NetDll_XNetInAddrToString_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetXnAddrToInAddr, rex::kernel::xam::NetDll_XNetXnAddrToInAddr_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetInAddrToXnAddr, rex::kernel::xam::NetDll_XNetInAddrToXnAddr_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetSetSystemLinkPort, rex::kernel::xam::NetDll_XNetSetSystemLinkPort_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetGetEthernetLinkStatus, rex::kernel::xam::NetDll_XNetGetEthernetLinkStatus_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetDnsLookup, rex::kernel::xam::NetDll_XNetDnsLookup_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetDnsRelease, rex::kernel::xam::NetDll_XNetDnsRelease_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetQosServiceLookup, rex::kernel::xam::NetDll_XNetQosServiceLookup_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetQosRelease, rex::kernel::xam::NetDll_XNetQosRelease_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetQosListen, rex::kernel::xam::NetDll_XNetQosListen_entry)
++REX_TRACE_EXPORT(__imp__NetDll_inet_addr, rex::kernel::xam::NetDll_inet_addr_entry)
++REX_TRACE_EXPORT(__imp__NetDll_socket, rex::kernel::xam::NetDll_socket_entry)
++REX_TRACE_EXPORT(__imp__NetDll_closesocket, rex::kernel::xam::NetDll_closesocket_entry)
++REX_TRACE_EXPORT(__imp__NetDll_shutdown, rex::kernel::xam::NetDll_shutdown_entry)
++REX_TRACE_EXPORT(__imp__NetDll_setsockopt, rex::kernel::xam::NetDll_setsockopt_entry)
++REX_TRACE_EXPORT(__imp__NetDll_ioctlsocket, rex::kernel::xam::NetDll_ioctlsocket_entry)
++REX_TRACE_EXPORT_SOCKADDR(__imp__NetDll_bind, rex::kernel::xam::NetDll_bind_entry, 5)
++REX_TRACE_EXPORT_SOCKADDR(__imp__NetDll_connect, rex::kernel::xam::NetDll_connect_entry, 5)
++REX_TRACE_EXPORT(__imp__NetDll_listen, rex::kernel::xam::NetDll_listen_entry)
++REX_TRACE_EXPORT(__imp__NetDll_accept, rex::kernel::xam::NetDll_accept_entry)
++REX_TRACE_EXPORT(__imp__NetDll_select, rex::kernel::xam::NetDll_select_entry)
++REX_TRACE_EXPORT(__imp__NetDll_recv, rex::kernel::xam::NetDll_recv_entry)
++REX_TRACE_EXPORT(__imp__NetDll_recvfrom, rex::kernel::xam::NetDll_recvfrom_entry)
++REX_TRACE_EXPORT(__imp__NetDll_send, rex::kernel::xam::NetDll_send_entry)
++REX_TRACE_EXPORT_SOCKADDR(__imp__NetDll_sendto, rex::kernel::xam::NetDll_sendto_entry, 8)
++REX_TRACE_EXPORT(__imp__NetDll___WSAFDIsSet, rex::kernel::xam::NetDll___WSAFDIsSet_entry)
++REX_TRACE_EXPORT(__imp__NetDll_WSASetLastError, rex::kernel::xam::NetDll_WSASetLastError_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetServerToInAddr,
++                 rex::kernel::xam::NetDll_XNetServerToInAddr_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetConnect, rex::kernel::xam::NetDll_XNetConnect_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetGetConnectStatus,
++                 rex::kernel::xam::NetDll_XNetGetConnectStatus_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetCreateKey, rex::kernel::xam::NetDll_XNetCreateKey_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetRegisterKey, rex::kernel::xam::NetDll_XNetRegisterKey_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetUnregisterKey,
++                 rex::kernel::xam::NetDll_XNetUnregisterKey_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetUnregisterInAddr,
++                 rex::kernel::xam::NetDll_XNetUnregisterInAddr_entry)
++REX_TRACE_EXPORT(__imp__NetDll_XNetQosLookup, rex::kernel::xam::NetDll_XNetQosLookup_entry)
++REX_TRACE_EXPORT(__imp__NetDll_getsockname, rex::kernel::xam::NetDll_getsockname_entry)
++
++REX_TRACE_EXPORT_STUB(__imp__NetDll_UpnpActionCalculateWorkBufferSize);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_UpnpActionCreate);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_UpnpActionGetResults);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_UpnpCleanup);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_UpnpCloseHandle);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_UpnpDescribeCreate);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_UpnpDescribeGetResults);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_UpnpDoWork);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_UpnpEventCreate);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_UpnpEventGetCurrentState);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_UpnpEventUnsubscribe);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_UpnpSearchCreate);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_UpnpSearchGetDevices);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_UpnpStartup);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_WSACancelOverlappedIO);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_WSAEventSelect);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_WSARecv);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_WSASend);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_WSAStartupEx);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpCloseHandle);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpConnect);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpCrackUrl);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpCrackUrlW);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpCreateUrl);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpCreateUrlW);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpDoWork);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpGetPerfCounters);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpOpen);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpOpenRequest);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpOpenRequestUsingMemory);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpQueryAuthSchemes);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpQueryHeaders);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpQueryOption);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpReadData);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpReceiveResponse);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpResetPerfCounters);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpSendRequest);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpSetCredentials);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpSetOption);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpSetStatusCallback);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpShutdown);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpStartup);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XHttpWriteData);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XNetDnsReverseLookup);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XNetDnsReverseRelease);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XNetGetBroadcastVersionStatus);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XNetGetSystemLinkPort);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XNetGetXnAddrPlatform);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XNetInAddrToServer);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XNetQosGetListenStats);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XNetReplaceKey);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XNetSetOpt);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XNetStartupEx);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XNetTsAddrToInAddr);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XmlDownloadContinue);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XmlDownloadGetParseTime);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XmlDownloadGetReceivedDataSize);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XmlDownloadStart);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XmlDownloadStop);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpCapture);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpConfig);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpConfigUPnP);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpConfigUPnPPortAndExternalAddr);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpEthernetInterceptRecv);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpEthernetInterceptSetCallbacks);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpEthernetInterceptSetExtendedReceiveCallback);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpEthernetInterceptXmit);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpEthernetInterceptXmitAsIp);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpGetActiveSocketList);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpGetConfigStatus);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpGetKeyList);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpGetQosLookupList);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpGetSecAssocList);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpGetVlanXboxName);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpLoadConfigParams);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpLoadMachineAccount);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpLogonClearChallenge);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpLogonClearQEvent);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpLogonGetChallenge);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpLogonGetQFlags);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpLogonGetQVals);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpLogonGetStatus);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpLogonSetChallengeResponse);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpLogonSetPState);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpLogonSetQEvent);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpLogonSetQFlags);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpLogonSetQVals);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpNoteSystemTime);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpPersistTitleState);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpQosHistoryGetAggregateMeasurement);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpQosHistoryGetEntries);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpQosHistoryLoad);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpQosHistorySaveMeasurements);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpRegisterKeyForCallerType);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpReplaceKeyForCallerType);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpSaveConfigParams);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpSaveMachineAccount);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpSetVlanXboxName);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpToolIpProxyInject);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpToolSetCallbacks);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpUnregisterKeyForCallerType);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_XnpUpdateConfigParams);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_getpeername);
++REX_TRACE_EXPORT_STUB(__imp__NetDll_getsockopt);
+diff --git a/src/kernel/xam/xam_user.cpp b/src/kernel/xam/xam_user.cpp
+index 8778066..5da0a65 100644
+--- a/src/kernel/xam/xam_user.cpp
++++ b/src/kernel/xam/xam_user.cpp
+@@ -15,6 +15,9 @@
+ #include <cstring>
+ 
+ #include <rex/cvar.h>
++#include <rex/kernel/xam/live/live.h>
++#include <rex/kernel/xam/live/xsession.h>
++#include <rex/kernel/xam/net_trace.h>
+ #include <rex/kernel/xam/private.h>
+ #include <rex/logging.h>
+ #include <rex/math.h>
+@@ -49,8 +52,8 @@ i32 XamUserGetXUID_entry(u32 user_index, u32 type_mask, mapped_u64 xuid_ptr) {
+       const auto& user_profile = REX_KERNEL_STATE()->user_profile();
+       auto type = user_profile->type() & type_mask;
+       if (type & (2 | 4)) {
+-        // maybe online profile?
+-        xuid = user_profile->xuid();
++        // maybe online profile? Signed in to Live, the install's online XUID.
++        xuid = live::SignedIn() ? live::OnlineXuid() : user_profile->xuid();
+         result = X_E_SUCCESS;
+       } else if (type & 1) {
+         // maybe offline profile?
+@@ -100,6 +103,14 @@ i32 XamUserGetSigninInfo_entry(u32 user_index, u32 flags, ppc_ptr_t<X_USER_SIGNI
+   info->xuid = user_profile->xuid();
+   info->signin_state = user_profile->signin_state();
+   rex::string::copy_truncating(info->name, user_profile->name(), rex::countof(info->name));
++  // Signed in to Live: the online XUID (unless only the offline one is asked for, flag 1)
++  // and the online name.
++  if (live::SignedIn()) {
++    if (flags != 1) {
++      info->xuid = live::OnlineXuid();
++    }
++    rex::string::copy_truncating(info->name, live::Gamertag(), rex::countof(info->name));
++  }
+   return X_E_SUCCESS;
+ }
+ 
+@@ -113,7 +124,7 @@ u32 XamUserGetName_entry(u32 user_index, mapped_string buffer, u32 buffer_len) {
+   }
+ 
+   const auto& user_profile = REX_KERNEL_STATE()->user_profile();
+-  const auto& user_name = user_profile->name();
++  const auto user_name = live::SignedIn() ? live::Gamertag() : user_profile->name();
+   rex::string::copy_truncating(buffer, user_name, std::min(buffer_len, uint32_t(16)));
+   return X_E_SUCCESS;
+ }
+@@ -382,8 +393,9 @@ u32 XamUserCheckPrivilege_entry(u32 user_index, u32 mask, mapped_u32 out_value)
+     }
+   }
+ 
+-  // If we deny everything, games should hopefully not try to do stuff.
+-  *out_value = 0;
++  // If we deny everything, games should hopefully not try to do stuff. Signed in to Live
++  // (--wwe_online), every privilege is granted.
++  *out_value = live::SignedIn() ? 1 : 0;
+   return X_ERROR_SUCCESS;
+ }
+ 
+@@ -713,11 +725,24 @@ u32 XamWriteGamerTile_entry(u32 arg1, u32 arg2, u32 arg3, u32 arg4, u32 arg5, u3
+ }
+ 
+ u32 XamSessionCreateHandle_entry(mapped_u32 handle_ptr) {
++  // With --wwe_online, a real session object (live/xsession.cpp).
++  if (live::Enabled()) {
++    uint32_t handle = 0;
++    const X_RESULT result = live::CreateSessionHandle(&handle);
++    *handle_ptr = handle;
++    return result;
++  }
+   *handle_ptr = 0xCAFEDEAD;
+   return X_ERROR_SUCCESS;
+ }
+ 
+ u32 XamSessionRefObjByHandle_entry(u32 handle, mapped_u32 obj_ptr) {
++  if (live::Enabled()) {
++    uint32_t guest_object = 0;
++    const X_RESULT result = live::SessionObjectByHandle(handle, &guest_object);
++    *obj_ptr = guest_object;
++    return result;
++  }
+   assert_true(handle == 0xCAFEDEAD);
+   // TODO(PermaNull): Implement this properly,
+   // For the time being returning 0xDEADF00D will prevent crashing.
+@@ -738,7 +763,7 @@ REX_EXPORT(__imp__XamUserReadProfileSettings, rex::kernel::xam::XamUserReadProfi
+ REX_EXPORT(__imp__XamUserReadProfileSettingsEx,
+            rex::kernel::xam::XamUserReadProfileSettingsEx_entry)
+ REX_EXPORT(__imp__XamUserWriteProfileSettings, rex::kernel::xam::XamUserWriteProfileSettings_entry)
+-REX_EXPORT(__imp__XamUserCheckPrivilege, rex::kernel::xam::XamUserCheckPrivilege_entry)
++REX_TRACE_EXPORT(__imp__XamUserCheckPrivilege, rex::kernel::xam::XamUserCheckPrivilege_entry)
+ REX_EXPORT(__imp__XamUserContentRestrictionGetFlags,
+            rex::kernel::xam::XamUserContentRestrictionGetFlags_entry)
+ REX_EXPORT(__imp__XamUserContentRestrictionGetRating,
+@@ -754,8 +779,8 @@ REX_EXPORT(__imp__XamUserCreateAchievementEnumerator,
+ REX_EXPORT(__imp__XamParseGamerTileKey, rex::kernel::xam::XamParseGamerTileKey_entry)
+ REX_EXPORT(__imp__XamReadTileToTexture, rex::kernel::xam::XamReadTileToTexture_entry)
+ REX_EXPORT(__imp__XamWriteGamerTile, rex::kernel::xam::XamWriteGamerTile_entry)
+-REX_EXPORT(__imp__XamSessionCreateHandle, rex::kernel::xam::XamSessionCreateHandle_entry)
+-REX_EXPORT(__imp__XamSessionRefObjByHandle, rex::kernel::xam::XamSessionRefObjByHandle_entry)
++REX_TRACE_EXPORT(__imp__XamSessionCreateHandle, rex::kernel::xam::XamSessionCreateHandle_entry)
++REX_TRACE_EXPORT(__imp__XamSessionRefObjByHandle, rex::kernel::xam::XamSessionRefObjByHandle_entry)
+ 
+ REX_EXPORT_STUB(__imp__XamUserAddRecentPlayer);
+ REX_EXPORT_STUB(__imp__XamUserAllowedToPostToSocialNetwork);
+diff --git a/src/system/xsocket.cpp b/src/system/xsocket.cpp
+index 2d13ac8..72b1101 100644
+--- a/src/system/xsocket.cpp
++++ b/src/system/xsocket.cpp
+@@ -193,7 +193,7 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADD
+   if (from) {
+     from->sin_family = nfrom.sin_family;
+     from->sin_addr = ntohl(nfrom.sin_addr.s_addr);  // BE <- BE
+-    from->sin_port = nfrom.sin_port;
++    from->sin_port = ntohs(nfrom.sin_port);  // BE <- BE
+     std::memset(from->x_sin_zero, 0, sizeof(from->x_sin_zero));
+   }
+ 
+@@ -223,9 +223,10 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
+ 
+   sockaddr_in nto;
+   if (to) {
+-    nto.sin_addr.s_addr = to->sin_addr;
++    // The be<> fields read as host-order values; sockaddr_in wants network order.
++    nto.sin_addr.s_addr = htonl(to->sin_addr);
+     nto.sin_family = to->sin_family;
+-    nto.sin_port = to->sin_port;
++    nto.sin_port = htons(to->sin_port);
+   }
+ 
+   return sendto(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
+diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
+index 3c3d49e..1cfc439 100644
+--- a/src/ui/rex_app.cpp
++++ b/src/ui/rex_app.cpp
+@@ -32,6 +32,7 @@
+ #include <rex/audio/sdl/sdl_audio_system.h>
+ #include <rex/input/input_system.h>
+ #include <rex/kernel/init.h>
++#include <rex/kernel/xam/live/upnp.h>
+ #include <rex/string/numeric.h>
+ #include <rex/system.h>
+ #include <rex/system/achievement_manager.h>
+@@ -533,6 +534,16 @@ void ReXApp::OnClosing(ui::UIEvent& e) {
+       REXLOG_WARN("Pad vibration stop timed out at exit");
+     }
+   }
++  // --wwe_online_upnp: the router mappings go with the game. Bounded the same way: the
++  // router may not answer.
++  if (rex::kernel::xam::live::upnp::Enabled()) {
++    std::packaged_task<void()> unmap([] { rex::kernel::xam::live::upnp::RemoveMappings(); });
++    auto unmapped = unmap.get_future();
++    std::thread(std::move(unmap)).detach();
++    if (unmapped.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
++      REXLOG_WARN("Removing the UPnP port mappings timed out at exit");
++    }
++  }
+   // Hard-exit rather than run subsystem teardown, which can deadlock on a host
+   // lock still held by a straggler TerminateTitle left running. Flush (not
+   // ShutdownLogging, which frees loggers a straggler may still use); the OS

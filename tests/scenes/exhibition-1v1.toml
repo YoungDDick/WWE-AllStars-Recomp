@@ -1,0 +1,81 @@
+# 1v1 Exhibition from boot to the result screen (ticket 25): Hogan (P1, idle)
+# vs Cena (CPU) in Arena_001 SmackDown; the CPU wins by KO. Route from
+# ticket 01, frame-anchored; capture frames from a Emulated survey run.
+# Run: python scripts/scene_runner.py tests/scenes/exhibition-1v1.toml
+
+name = "exhibition-1v1"
+from = "boot"
+
+input = """
+# Title: START is ignored while the logo animates in.
+at 2900
+press START 6f
+# AUTOSAVE notice
+at 3200
+press A 6f
+# Main menu: UnlockAll, then close the popup, then Up back to EXHIBITION.
+at 3700
+press LEFT 6f
+press Y 6f
+press DOWN 6f
+press LEFT 6f
+press Y 6f
+press X 6f
+press LEFT 6f
+press X 6f
+press Y 6f
+press DOWN 6f
+press RIGHT 6f
+press X 6f
+press LEFT 6f
+press UP 6f
+press X 6f
+press RIGHT 6f
+at 4400
+press A 6f
+at 4600
+press UP 6f
+# EXHIBITION, STANDARD, 1 vs. 1
+at 4800
+press A 6f
+at 5100
+press A 6f
+at 5400
+press A 6f
+# Controller select: pad 1 to the blue socket, accept
+at 5600
+press LEFT 6f
+at 5700
+press A 6f
+# Select screen: P1 Hogan, then the same pad picks P2 Cena; arena select follows
+at 5950
+press A 6f
+at 6050
+press A 6f
+# Arena: cursor starts on SMACKDOWN. P1 then idles and the CPU wins by KO.
+at 6300
+press A 6f
+"""
+
+[[capture]]  # select screen, Hogan vs Cena
+frame = 6000
+[[capture]]  # arena select, SMACKDOWN
+frame = 6300
+[[capture]]  # arena intro
+frame = 6600
+[[capture]]  # Hogan entrance
+frame = 7200
+[[capture]]  # Cena entrance
+frame = 8400
+[[capture]]  # loading screen (tips)
+frame = 9000
+[[capture]]  # bell, match starts
+frame = 9600
+[[capture]]  # in-ring
+frame = 12000
+[[capture]]  # Cena finisher
+frame = 15000
+[[capture]]  # KO
+frame = 15300
+[[capture]]  # result screen (WINNER JOHN CENA)
+frame = 16500

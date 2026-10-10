@@ -1,0 +1,66 @@
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -58,6 +58,15 @@
+   std::unordered_map<uint32_t, bool> dumped_ibs;
+   // DRAW_INDX_2 per (indirect buffer, primitive type), reset at each log.
+   std::unordered_map<uint64_t, uint64_t> draw2_sources;
++  // Per indirect buffer address: executions, content changes between them,
++  // and the last content hash and length (dwords). Reset at each log.
++  struct IbHistory {
++    uint64_t executions = 0;
++    uint64_t changes = 0;
++    uint64_t hash = 0;
++    uint32_t length = 0;
++  };
++  std::unordered_map<uint32_t, IbHistory> ib_history;
+ } g_draw_census;
+ }  // namespace
+ 
+@@ -1055,6 +1064,24 @@
+                          uint32_t(sources[i].first & 0x3F), sources[i].second);
+     }
+     REXGPU_INFO("draw-census gpu draw_indx_2 sources (last 60 swaps):{}", top);
++    uint64_t ib_static = 0, ib_changing = 0, ib_words = 0;
++    std::string changing;
++    for (const auto& [address, history] : g_draw_census.ib_history) {
++      ib_words += uint64_t(history.length) * history.executions;
++      if (history.changes) {
++        ++ib_changing;
++        if (changing.size() < 400) {
++          changing += fmt::format(" {:08X}:{}/{}x{}w", address, history.changes,
++                                  history.executions, history.length);
++        }
++      } else {
++        ++ib_static;
++      }
++    }
++    REXGPU_INFO("draw-census gpu ib-history (last 60 swaps) buffers={} static={} changing={} "
++                "words={} changed:{}",
++                g_draw_census.ib_history.size(), ib_static, ib_changing, ib_words, changing);
++    g_draw_census.ib_history.clear();
+     g_draw_census.draw2_sources.clear();
+     g_draw_census.indirect_min = UINT32_MAX;
+     g_draw_census.indirect_max = 0;
+@@ -1073,6 +1100,22 @@
+   g_draw_census.indirect_max = std::max(g_draw_census.indirect_max, list_ptr);
+   assert_zero(list_length & ~0xFFFFF);
+   list_length &= 0xFFFFF;
++  if (REXCVAR_GET(gpu_draw_census) && list_length) {
++    // FNV-1a over the buffer: are command buffers replayed or rebuilt?
++    const auto* words =
++        reinterpret_cast<const uint8_t*>(memory_->TranslatePhysical(list_ptr));
++    uint64_t hash = 14695981039346656037ull;
++    for (uint32_t i = 0; i < list_length * 4; ++i) {
++      hash = (hash ^ words[i]) * 1099511628211ull;
++    }
++    auto& history = g_draw_census.ib_history[list_ptr];
++    if (history.executions && (history.hash != hash || history.length != list_length)) {
++      ++history.changes;
++    }
++    ++history.executions;
++    history.hash = hash;
++    history.length = list_length;
++  }
+   ExecuteIndirectBuffer(GpuToCpu(list_ptr), list_length);
+   return true;
+ }

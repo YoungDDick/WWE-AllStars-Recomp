@@ -1,0 +1,644 @@
+diff --git a/include/rex/input/input_driver.h b/include/rex/input/input_driver.h
+index 52116f1..ee2beb7 100644
+--- a/include/rex/input/input_driver.h
++++ b/include/rex/input/input_driver.h
+@@ -12,6 +12,7 @@
+ 
+ #include <cstddef>
+ #include <functional>
++#include <string_view>
+ #include <vector>
+ 
+ #include <rex/input/device.h>
+@@ -46,6 +47,10 @@ class InputDriver {
+ 
+   virtual void OnWindowAvailable(rex::ui::Window* /*window*/) {}
+ 
++  /// The name the vibration log line gives this driver ("sdl", "xinput").
++  /// Empty for drivers with no real pads (MnK, NOP).
++  virtual std::string_view vibration_backend() const { return {}; }
++
+   void set_is_active_callback(std::function<bool()> is_active_callback) {
+     is_active_callback_ = is_active_callback;
+   }
+diff --git a/include/rex/input/input_system.h b/include/rex/input/input_system.h
+index e5010ab..93e506b 100644
+--- a/include/rex/input/input_system.h
++++ b/include/rex/input/input_system.h
+@@ -13,12 +13,15 @@
+ #include <functional>
+ #include <memory>
+ #include <mutex>
++#include <optional>
++#include <string>
+ #include <vector>
+ 
+ #include <rex/input/device_assignment.h>
+ #include <rex/input/input.h>
+ #include <rex/input/input_driver.h>
+ #include <rex/input/state_merge.h>
++#include <rex/input/vibration_ledger.h>
+ #include <rex/system/interfaces/input.h>
+ 
+ namespace rex::ui {
+@@ -56,8 +59,34 @@ class InputSystem : public system::IInputSystem {
+   X_RESULT GetCapabilities(uint32_t user_index, uint32_t flags, X_INPUT_CAPABILITIES* out_caps);
+   X_RESULT GetState(uint32_t user_index, X_INPUT_STATE* out_state);
+   X_RESULT SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration);
++  /// As above, with the player index the guest passed before XamInputSetState
++  /// pinned it, for the vibration ledger and trace.
++  X_RESULT SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration, uint32_t raw_user_index);
+   X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags, X_INPUT_KEYSTROKE* out_keystroke);
+ 
++  /// Every vibration request the guest sent so far (a copy).
++  VibrationLedger vibration_ledger();
++  /// The pad drivers the vibration line names, as AddDriver added them
++  /// ("sdl", "xinput", "sdl+script"), or "none" when no pad driver loaded.
++  std::string vibration_backend();
++  std::string VibrationLine(VibrationLineKind kind);
++  /// Logs the vibration line if it changed since the last one logged; returns
++  /// whether it did. SetState calls it every 10 s.
++  bool LogVibration(VibrationLineKind kind);
++  /// Sets every real pad on every driver to zero and logs the final line, so
++  /// no motor outlives the game. Synthetic devices are skipped. Later
++  /// SetState calls are dropped, so a straggling guest thread cannot restart
++  /// a motor. Shutdown and ReXApp::OnClosing call it; only the first call acts.
++  void StopVibration();
++
++  /// What a request sends to the pads: (user index after the pin, the guest's
++  /// motor speeds) -> the motor speeds the user's pads get. Called once per
++  /// request, so a change applies to the next one; the ledger and trace still
++  /// record the guest's request.
++  using VibrationOutput =
++      std::function<X_INPUT_VIBRATION(uint32_t user_index, const X_INPUT_VIBRATION& requested)>;
++  void set_vibration_output(VibrationOutput output);
++
+  private:
+   /// Re-enumerates every driver and notifies the assignment when the set
+   /// changed.
+@@ -67,6 +96,10 @@ class InputSystem : public system::IInputSystem {
+ 
+   bool GuestInputHeld();
+ 
++  /// Adds one request to the ledger and logs the periodic line when due.
++  void RecordVibration(uint32_t raw_user_index, uint32_t user_index,
++                       const X_INPUT_VIBRATION& vibration, std::optional<X_RESULT> pads);
++
+   rex::ui::Window* window_ = nullptr;
+ 
+   std::vector<std::unique_ptr<InputDriver>> drivers_;
+@@ -76,6 +109,18 @@ class InputSystem : public system::IInputSystem {
+   X_INPUT_STATE real_state_[4] = {};
+   bool has_real_state_[4] = {};
+ 
++  // Guards the ledger, its log, the request trace and the backend name.
++  std::mutex vibration_mutex_;
++  VibrationLedger vibration_;
++  VibrationLog vibration_log_;
++  VibrationTrace vibration_trace_;
++  std::string backend_name_ = "none";
++  // Serialises SetState's driver calls with StopVibration's; guards the
++  // output.
++  std::mutex vibration_drive_mutex_;
++  bool vibration_stopped_ = false;
++  VibrationOutput vibration_output_;
++
+   std::unique_ptr<DeviceAssignment> assignment_;
+   ActiveDeviceTracker active_devices_;
+ 
+diff --git a/include/rex/input/sdl/sdl_input_driver.h b/include/rex/input/sdl/sdl_input_driver.h
+index cf0e3d1..5422252 100644
+--- a/include/rex/input/sdl/sdl_input_driver.h
++++ b/include/rex/input/sdl/sdl_input_driver.h
+@@ -33,6 +33,7 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener
+   ~SDLInputDriver() override;
+ 
+   X_STATUS Setup() override;
++  std::string_view vibration_backend() const override { return "sdl"; }
+ 
+   void EnumerateDevices(std::vector<DeviceInfo>& out) override;
+   X_RESULT GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) override;
+diff --git a/include/rex/input/vibration_ledger.h b/include/rex/input/vibration_ledger.h
+new file mode 100644
+index 0000000..183d887
+--- /dev/null
++++ b/include/rex/input/vibration_ledger.h
+@@ -0,0 +1,226 @@
++#pragma once
++/**
++ * @file        rex/input/vibration_ledger.h
++ * @brief       Counts the guest's vibration requests at InputSystem::SetState.
++ *
++ * WWE All Stars recomp: tells "the game sends only zeros" apart from "the pad
++ * refused" from one log line (.scratch/controller-vibration/spec.md).
++ */
++
++#include <algorithm>
++#include <array>
++#include <chrono>
++#include <cstdint>
++#include <optional>
++#include <string>
++#include <string_view>
++
++#include <fmt/format.h>
++
++#include <rex/kernel.h>
++
++namespace rex::input {
++
++/// Which log line: one SetState emits every 10 s, or the one at exit.
++enum class VibrationLineKind { kPeriodic, kFinal };
++
++inline std::string_view ToString(VibrationLineKind kind) {
++  return kind == VibrationLineKind::kFinal ? "final" : "periodic";
++}
++
++/// The pad driver's answer as the log lines spell it.
++inline std::string PadResultText(X_RESULT result) {
++  if (result == X_ERROR_SUCCESS) {
++    return "success";
++  }
++  if (result == X_ERROR_DEVICE_NOT_CONNECTED) {
++    return "not_connected";
++  }
++  return fmt::format("0x{:08X}", static_cast<uint32_t>(result));
++}
++
++/// The player index the guest passed, before XamInputSetState pins 0xFF
++/// ("any user") to user 0: 0-3, ff, or other.
++enum class RawIndex : size_t { k0, k1, k2, k3, kAny, kOther, kCount };
++
++inline RawIndex ToRawIndex(uint32_t raw_user) {
++  const uint32_t low = raw_user & 0xFF;
++  if (low == 0xFF) {
++    return RawIndex::kAny;
++  }
++  return raw_user < 4 ? static_cast<RawIndex>(raw_user) : RawIndex::kOther;
++}
++
++inline std::string_view ToString(RawIndex index) {
++  constexpr std::string_view kNames[] = {"0", "1", "2", "3", "ff", "other"};
++  return kNames[static_cast<size_t>(index)];
++}
++
++struct VibrationIndexCount {
++  uint64_t requests = 0;
++  uint64_t nonzero = 0;
++};
++
++struct VibrationLedger {
++  uint64_t requests = 0;  // every SetState call
++  uint64_t nonzero = 0;   // ... with either motor above zero
++  uint16_t peak_left = 0;
++  uint16_t peak_right = 0;
++  uint32_t last_user = 0;
++  uint16_t last_left = 0;
++  uint16_t last_right = 0;
++  // What the real pads answered to the last request a pad took part in.
++  // Requests that reach no pad (synthetic devices only, or a user with no pad)
++  // leave it alone, so with no pad at all it reads "not connected".
++  X_RESULT pad_result = X_ERROR_DEVICE_NOT_CONNECTED;
++  // The same counts split by the raw player index, indexed by RawIndex.
++  std::array<VibrationIndexCount, static_cast<size_t>(RawIndex::kCount)> by_raw_index{};
++
++  const VibrationIndexCount& ForRawIndex(uint32_t raw_user) const {
++    return by_raw_index[static_cast<size_t>(ToRawIndex(raw_user))];
++  }
++
++  /// `user` is the index after the pin, `raw_user` the one the guest passed.
++  /// `pads` is the real pads' answer, or empty when no pad took part.
++  void Record(uint32_t raw_user, uint32_t user, uint16_t left, uint16_t right,
++              std::optional<X_RESULT> pads) {
++    auto& by_index = by_raw_index[static_cast<size_t>(ToRawIndex(raw_user))];
++    requests++;
++    by_index.requests++;
++    if (left || right) {
++      nonzero++;
++      by_index.nonzero++;
++    }
++    peak_left = std::max(peak_left, left);
++    peak_right = std::max(peak_right, right);
++    last_user = user;
++    last_left = left;
++    last_right = right;
++    if (pads) {
++      pad_result = *pads;
++    }
++  }
++
++  /// True when the line would say something new since `logged`. A game that
++  /// repeats the same request every frame only moves `requests`, which on its
++  /// own is not news.
++  bool ChangedSince(const VibrationLedger& logged) const {
++    return (requests != 0 && logged.requests == 0) || nonzero != logged.nonzero ||
++           peak_left != logged.peak_left || peak_right != logged.peak_right ||
++           last_user != logged.last_user || last_left != logged.last_left ||
++           last_right != logged.last_right || pad_result != logged.pad_result;
++  }
++
++  std::string Line(VibrationLineKind kind, std::string_view backend) const {
++    std::string split;
++    for (size_t i = 0; i < by_raw_index.size(); ++i) {
++      split += fmt::format("{}{}:{}/{}", i ? "," : "", ToString(static_cast<RawIndex>(i)),
++                           by_raw_index[i].requests, by_raw_index[i].nonzero);
++    }
++    return fmt::format(
++        "vibration {}: backend={} requests={} nonzero={} peak_left={} peak_right={} "
++        "last_user={} last_left={} last_right={} pad_result={} by_raw_index={}",
++        ToString(kind), backend, requests, nonzero, peak_left, peak_right, last_user, last_left,
++        last_right, PadResultText(pad_result), split);
++  }
++};
++
++/// When to log the ledger: a periodic line at most every 10 s, and only when
++/// it says something new since the last line logged.
++class VibrationLog {
++ public:
++  using Clock = std::chrono::steady_clock;
++  static constexpr Clock::duration kPeriod = std::chrono::seconds(10);
++
++  /// Call after each request. True once per period; the first request starts
++  /// the clock.
++  bool PeriodicDue(Clock::time_point now) {
++    if (next_ == Clock::time_point{}) {
++      next_ = now + kPeriod;
++      return false;
++    }
++    if (now < next_) {
++      return false;
++    }
++    next_ = now + kPeriod;
++    return true;
++  }
++
++  /// The line to log if `ledger` changed since the last one taken, which it
++  /// then remembers.
++  std::optional<std::string> TakeIfChanged(const VibrationLedger& ledger, VibrationLineKind kind,
++                                           std::string_view backend) {
++    if (!ledger.ChangedSince(logged_)) {
++      return std::nullopt;
++    }
++    logged_ = ledger;
++    return ledger.Line(kind, backend);
++  }
++
++ private:
++  Clock::time_point next_{};
++  VibrationLedger logged_;
++};
++
++/// One log line per non-zero request, and one for the zero that ends each
++/// pulse with its length, per raw player index; capped so a game that rumbles
++/// all match cannot flood the log.
++class VibrationTrace {
++ public:
++  using Clock = std::chrono::steady_clock;
++  static constexpr uint32_t kMaxLines = 300;
++
++  /// Call for every request; returns the line to log, if any. `t` in the
++  /// line counts from the first request.
++  std::optional<std::string> Take(uint32_t raw_user, uint32_t user, uint16_t left, uint16_t right,
++                                  std::optional<X_RESULT> pads, Clock::time_point now) {
++    if (!started_) {
++      started_ = true;
++      start_ = now;
++    }
++    Pulse& pulse = pulses_[static_cast<size_t>(ToRawIndex(raw_user))];
++    const bool nonzero = left || right;
++    if (!nonzero && pulse.requests == 0) {
++      return std::nullopt;  // at rest
++    }
++    if (lines_ > kMaxLines) {
++      return std::nullopt;
++    }
++    if (lines_ == kMaxLines) {
++      lines_++;
++      return fmt::format("vibration trace: {} lines logged, later requests are only counted",
++                         kMaxLines);
++    }
++    lines_++;
++    const RawIndex index = ToRawIndex(raw_user);
++    const std::string raw = index == RawIndex::kOther ? fmt::format("0x{:X}", raw_user)
++                                                      : std::string(ToString(index));
++    std::string line = fmt::format(
++        "vibration request: t={:.3f}s raw_index={} user={} left={} right={} pad_result={}",
++        std::chrono::duration<double>(now - start_).count(), raw, user, left, right,
++        pads ? PadResultText(*pads) : std::string("no_pad"));
++    if (nonzero) {
++      if (pulse.requests++ == 0) {
++        pulse.start = now;
++      }
++    } else {
++      const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - pulse.start);
++      line += fmt::format(" pulse_end pulse_ms={} pulse_requests={}", ms.count(), pulse.requests);
++      pulse = {};
++    }
++    return line;
++  }
++
++ private:
++  struct Pulse {
++    Clock::time_point start{};
++    uint64_t requests = 0;  // non-zero requests since the pulse began
++  };
++
++  bool started_ = false;
++  Clock::time_point start_{};
++  uint32_t lines_ = 0;
++  std::array<Pulse, static_cast<size_t>(RawIndex::kCount)> pulses_{};
++};
++
++}  // namespace rex::input
+diff --git a/include/rex/input/xinput/xinput_input_driver.h b/include/rex/input/xinput/xinput_input_driver.h
+index d03a3d6..4d486eb 100644
+--- a/include/rex/input/xinput/xinput_input_driver.h
++++ b/include/rex/input/xinput/xinput_input_driver.h
+@@ -26,6 +26,7 @@ class XinputInputDriver final : public InputDriver {
+   ~XinputInputDriver() override;
+ 
+   X_STATUS Setup() override;
++  std::string_view vibration_backend() const override { return "xinput"; }
+ 
+   void EnumerateDevices(std::vector<DeviceInfo>& out) override;
+   X_RESULT GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) override;
+diff --git a/src/input/input_system.cpp b/src/input/input_system.cpp
+index 09466ac..927c936 100644
+--- a/src/input/input_system.cpp
++++ b/src/input/input_system.cpp
+@@ -48,6 +48,7 @@ X_STATUS InputSystem::Setup() {
+ }
+ 
+ void InputSystem::Shutdown() {
++  StopVibration();
+   // device_owners_ holds raw driver pointers.
+   devices_.clear();
+   device_owners_.clear();
+@@ -55,6 +56,17 @@ void InputSystem::Shutdown() {
+ }
+ 
+ void InputSystem::AddDriver(std::unique_ptr<InputDriver> driver) {
++  // The one place the vibration line's backend is set, so every factory names
++  // the driver that actually loaded rather than the one it asked for.
++  if (const std::string_view name = driver->vibration_backend(); !name.empty()) {
++    std::lock_guard lock(vibration_mutex_);
++    if (backend_name_ == "none") {
++      backend_name_ = name;
++    } else {
++      backend_name_ += '+';
++      backend_name_ += name;
++    }
++  }
+   drivers_.push_back(std::move(driver));
+ }
+ 
+@@ -288,8 +300,19 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+ }
+ 
+ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration) {
++  return SetState(user_index, vibration, user_index);
++}
++
++X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration,
++                               uint32_t raw_user_index) {
+   SCOPE_profile_cpu_f("hid");
++  if ((user_index & 0xFF) == 0xFF) {
++    // "Any user" rumbles player 1. XamInputSetState pins it too; repeated here
++    // for callers that bypass XAM, like the tests.
++    user_index = 0;
++  }
+   if (!assignment_) {
++    RecordVibration(raw_user_index, user_index, *vibration, X_ERROR_DEVICE_NOT_CONNECTED);
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+ 
+@@ -304,30 +327,129 @@ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration
+   bool any_synthetic = false;
+   bool pad_rumbled = false;
+   X_RESULT pad_error = X_ERROR_DEVICE_NOT_CONNECTED;
+-  for (DeviceId id : ids) {
+-    auto* driver = DriverForDevice(id);
+-    const DeviceInfo* info = DeviceInfoFor(id);
+-    if (!driver || !info) {
+-      continue;
++  {
++    std::lock_guard drive(vibration_drive_mutex_);
++    if (vibration_stopped_) {
++      return X_ERROR_DEVICE_NOT_CONNECTED;  // the pads were stopped for good
+     }
+-    X_RESULT result = driver->SetDeviceVibration(id, vibration);
+-    if (info->synthetic) {
+-      any_synthetic = true;
+-      continue;
++    X_INPUT_VIBRATION output = *vibration;
++    if (vibration_output_) {
++      output = vibration_output_(user_index, *vibration);
+     }
+-    any_pad = true;
+-    if (result == X_ERROR_SUCCESS) {
+-      pad_rumbled = true;
+-    } else {
+-      pad_error = result;
++    X_INPUT_VIBRATION* sent = &output;
++    for (DeviceId id : ids) {
++      auto* driver = DriverForDevice(id);
++      const DeviceInfo* info = DeviceInfoFor(id);
++      if (!driver || !info) {
++        continue;
++      }
++      X_RESULT result = driver->SetDeviceVibration(id, sent);
++      if (info->synthetic) {
++        any_synthetic = true;
++        continue;
++      }
++      any_pad = true;
++      if (result == X_ERROR_SUCCESS) {
++        pad_rumbled = true;
++      } else {
++        pad_error = result;
++      }
+     }
+   }
++  std::optional<X_RESULT> pads;
+   if (any_pad) {
+-    return pad_rumbled ? X_ERROR_SUCCESS : pad_error;
++    pads = pad_rumbled ? X_ERROR_SUCCESS : pad_error;
++  }
++  RecordVibration(raw_user_index, user_index, *vibration, pads);
++  if (pads) {
++    return *pads;
+   }
+   return any_synthetic ? X_ERROR_SUCCESS : X_ERROR_DEVICE_NOT_CONNECTED;
+ }
+ 
++void InputSystem::RecordVibration(uint32_t raw_user_index, uint32_t user_index,
++                                  const X_INPUT_VIBRATION& vibration,
++                                  std::optional<X_RESULT> pads) {
++  std::optional<std::string> trace;
++  std::optional<std::string> line;
++  {
++    std::lock_guard lock(vibration_mutex_);
++    const auto now = VibrationLog::Clock::now();
++    vibration_.Record(raw_user_index, user_index, vibration.left_motor_speed,
++                      vibration.right_motor_speed, pads);
++    trace = vibration_trace_.Take(raw_user_index, user_index, vibration.left_motor_speed,
++                                  vibration.right_motor_speed, pads, now);
++    if (vibration_log_.PeriodicDue(now)) {
++      line = vibration_log_.TakeIfChanged(vibration_, VibrationLineKind::kPeriodic, backend_name_);
++    }
++  }
++  if (trace) {
++    REXLOG_INFO("{}", *trace);
++  }
++  if (line) {
++    REXLOG_INFO("{}", *line);
++  }
++}
++
++VibrationLedger InputSystem::vibration_ledger() {
++  std::lock_guard lock(vibration_mutex_);
++  return vibration_;
++}
++
++std::string InputSystem::vibration_backend() {
++  std::lock_guard lock(vibration_mutex_);
++  return backend_name_;
++}
++
++std::string InputSystem::VibrationLine(VibrationLineKind kind) {
++  std::lock_guard lock(vibration_mutex_);
++  return vibration_.Line(kind, backend_name_);
++}
++
++void InputSystem::StopVibration() {
++  {
++    std::lock_guard drive(vibration_drive_mutex_);
++    if (vibration_stopped_) {
++      return;
++    }
++    vibration_stopped_ = true;
++    std::vector<DeviceInfo> devices;
++    for (auto& driver : drivers_) {
++      devices.clear();
++      driver->EnumerateDevices(devices);
++      for (const auto& device : devices) {
++        if (device.synthetic) {
++          continue;
++        }
++        X_INPUT_VIBRATION zero = {};
++        // A pad that went away answers "not connected"; the others still stop.
++        driver->SetDeviceVibration(device.id, &zero);
++      }
++    }
++  }
++  REXLOG_INFO("{}", VibrationLine(VibrationLineKind::kFinal));
++  // Written out now: the window-X path hard-exits soon after.
++  rex::FlushLogging();
++}
++
++void InputSystem::set_vibration_output(VibrationOutput output) {
++  std::lock_guard drive(vibration_drive_mutex_);
++  vibration_output_ = std::move(output);
++}
++
++bool InputSystem::LogVibration(VibrationLineKind kind) {
++  std::optional<std::string> line;
++  {
++    std::lock_guard lock(vibration_mutex_);
++    line = vibration_log_.TakeIfChanged(vibration_, kind, backend_name_);
++  }
++  if (!line) {
++    return false;
++  }
++  REXLOG_INFO("{}", *line);
++  return true;
++}
++
+ X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
+                                    X_INPUT_KEYSTROKE* out_keystroke) {
+   SCOPE_profile_cpu_f("hid");
+diff --git a/src/input/sdl/sdl_input_driver.cpp b/src/input/sdl/sdl_input_driver.cpp
+index c7c440d..7eb931b 100644
+--- a/src/input/sdl/sdl_input_driver.cpp
++++ b/src/input/sdl/sdl_input_driver.cpp
+@@ -225,10 +225,15 @@ X_RESULT SDLInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+ }
+ 
+ X_RESULT SDLInputDriver::SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* vibration) {
+-  assert(sdl_events_initialized_ && SDL_Gamepad_initialized_);
+-
+-  QueueControllerUpdate();
++  // No window yet, or SDL already closed: nothing to rumble.
++  if (!sdl_events_initialized_ || !SDL_Gamepad_initialized_) {
++    return X_ERROR_DEVICE_NOT_CONNECTED;
++  }
+ 
++  // No QueueControllerUpdate here: rumble reads no pad state, and queuing work
++  // for the UI thread pushes an SDL event, which blocks while the window-X
++  // close runs inside SDL's event watch. InputSystem::StopVibration runs on a
++  // helper thread during that close; GetState keeps pumping in normal play.
+   auto guard = DrainAndLock();
+ 
+   auto controller = FindController(id);
+diff --git a/src/kernel/xam/xam_input.cpp b/src/kernel/xam/xam_input.cpp
+index 80c3634..f8c4b06 100644
+--- a/src/kernel/xam/xam_input.cpp
++++ b/src/kernel/xam/xam_input.cpp
+@@ -129,7 +129,8 @@ u32 XamInputSetState_entry(u32 user_index, u32 unk, ppc_ptr_t<X_INPUT_VIBRATION>
+ 
+   (void)unk;  // Unused in this implementation
+   auto* is = input_system();
+-  return is->SetState(actual_user_index, vibration);
++  // The raw index too: the vibration ledger tells "any user" apart from user 0.
++  return is->SetState(actual_user_index, vibration, user_index);
+ }
+ 
+ // https://msdn.microsoft.com/en-us/library/windows/desktop/microsoft.directx_sdk.reference.xinputgetkeystroke(v=vs.85).aspx
+diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
+index 3a15805..3c3d49e 100644
+--- a/src/ui/rex_app.cpp
++++ b/src/ui/rex_app.cpp
+@@ -11,7 +11,10 @@
+ 
+ #include <rex/rex_app.h>
+ 
++#include <chrono>
+ #include <cstdlib>
++#include <future>
++#include <thread>
+ 
+ #include <rex/assert.h>
+ #include <rex/cvar.h>
+@@ -515,6 +518,21 @@ void ReXApp::OnClosing(ui::UIEvent& e) {
+   if (runtime_ && runtime_->kernel_state()) {
+     runtime_->kernel_state()->TerminateTitle();
+   }
++  // The hard exit below skips InputSystem::Shutdown, so stop the pads here or a
++  // motor the game left running keeps buzzing. On a helper thread with a
++  // bounded wait: a straggler may still hold a driver lock.
++  if (runtime_ && runtime_->input_system()) {
++    auto* input = static_cast<rex::input::InputSystem*>(runtime_->input_system());
++    std::packaged_task<void()> stop([input] { input->StopVibration(); });
++    auto stopped = stop.get_future();
++    // Detached, so a stop stuck on a driver lock cannot hold up the exit. Safe
++    // only because std::_Exit below ends the process right after: the thread
++    // never outlives `input`.
++    std::thread(std::move(stop)).detach();
++    if (stopped.wait_for(std::chrono::milliseconds(500)) != std::future_status::ready) {
++      REXLOG_WARN("Pad vibration stop timed out at exit");
++    }
++  }
+   // Hard-exit rather than run subsystem teardown, which can deadlock on a host
+   // lock still held by a straggler TerminateTitle left running. Flush (not
+   // ShutdownLogging, which frees loggers a straggler may still use); the OS
+@@ -526,6 +544,10 @@ void ReXApp::OnClosing(ui::UIEvent& e) {
+ 
+ bool ReXApp::OnCloseRequested(ui::UIEvent& e) {
+   (void)e;
++  // Written out at once, so a log that lacks it shows the close never reached
++  // the app (run 1 of the vibration work ended with no close lines at all).
++  REXLOG_INFO("Window close requested");
++  rex::FlushLogging();
+   return OnWindowCloseRequested();
+ }
+ 

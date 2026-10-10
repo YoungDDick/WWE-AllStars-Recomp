@@ -1,0 +1,99 @@
+diff --git a/include/rex/rex_app.h b/include/rex/rex_app.h
+index 1f52480..55aeb2e 100644
+--- a/include/rex/rex_app.h
++++ b/include/rex/rex_app.h
+@@ -283,8 +283,17 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
+   void OnMinimized(ui::UIEvent& e) override;
+   void OnRestored(ui::UIEvent& e) override;
+ 
+-  // WindowInputListener overrides
++ protected:
++  // WindowInputListener overrides; an app that overrides them calls these for
++  // the binds and the fullscreen toggle.
+   void OnKeyDown(ui::KeyEvent& e) override;
++  void OnMouseDown(ui::MouseEvent& e) override;
++
++  // Alt+Enter switches between fullscreen and a window; a double click in a
++  // window goes fullscreen.
++  void ToggleFullscreen();
++
++ private:
+ 
+   PPCImageInfo ppc_info_;
+   PathConfig resolved_defaults_;
+diff --git a/include/rex/ui/ui_event.h b/include/rex/ui/ui_event.h
+index 80dd79c..379b23c 100644
+--- a/include/rex/ui/ui_event.h
++++ b/include/rex/ui/ui_event.h
+@@ -150,10 +150,14 @@ class MouseEvent : public UIEvent {
+   // Fractional, so accumulate before rounding.
+   float dx() const { return dx_; }
+   float dy() const { return dy_; }
++  // Clicks in a row for a button press (2 for a double click).
++  int32_t clicks() const { return clicks_; }
++  void set_clicks(int32_t clicks) { clicks_ = clicks; }
+ 
+  private:
+   bool handled_ = false;
+   Button button_;
++  int32_t clicks_ = 1;
+   int32_t x_ = 0;
+   int32_t y_ = 0;
+   int32_t scroll_x_ = 0;
+diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
+index 1cfc439..dc858fd 100644
+--- a/src/ui/rex_app.cpp
++++ b/src/ui/rex_app.cpp
+@@ -509,9 +509,40 @@ std::function<void(PathConfig)> ReXApp::MakeResumeCallback() {
+ }
+ 
+ void ReXApp::OnKeyDown(ui::KeyEvent& e) {
++  if (e.virtual_key() == ui::VirtualKey::kReturn && e.is_alt_pressed()) {
++    // A held key repeats; only the first press switches.
++    if (!e.prev_state()) {
++      ToggleFullscreen();
++    }
++    e.set_handled(true);
++    return;
++  }
+   rex::ui::ProcessKeyEvent(e);
+ }
+ 
++void ReXApp::OnMouseDown(ui::MouseEvent& e) {
++  // A double click only enters fullscreen: one in fullscreen is a stray click,
++  // and Alt+Enter is the way back to a window.
++  if (e.button() != ui::MouseEvent::Button::kLeft || e.clicks() != 2 || !window_ ||
++      window_->IsFullscreen()) {
++    return;
++  }
++  // A double click on an overlay window belongs to the overlay.
++  if (imgui_drawer_ && imgui_drawer_->GetIO().WantCaptureMouse) {
++    return;
++  }
++  ToggleFullscreen();
++  e.set_handled(true);
++}
++
++void ReXApp::ToggleFullscreen() {
++  if (!window_) {
++    return;
++  }
++  // Through the cvar, so the change callback applies it and the settings show it.
++  rex::cvar::SetFlagByName("fullscreen", window_->IsFullscreen() ? "false" : "true");
++}
++
+ void ReXApp::OnClosing(ui::UIEvent& e) {
+   (void)e;
+   REXLOG_INFO("Window closing, shutting down...");
+diff --git a/src/ui/window_sdl.cpp b/src/ui/window_sdl.cpp
+index 2251429..6b7ae64 100644
+--- a/src/ui/window_sdl.cpp
++++ b/src/ui/window_sdl.cpp
+@@ -568,6 +568,7 @@ void WindowSDL::HandleMouseEvent(SDL_Event& event) {
+     case SDL_EVENT_MOUSE_BUTTON_UP: {
+       MouseEvent e(this, TranslateSDLMouseButton(event.button.button),
+                    int32_t(event.button.x * density), int32_t(event.button.y * density));
++      e.set_clicks(event.button.clicks);
+       if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+         OnMouseDown(e, destruction_receiver);
+       } else {

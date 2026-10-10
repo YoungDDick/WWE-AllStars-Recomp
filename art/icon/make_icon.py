@@ -1,0 +1,155 @@
+"""Builds the project's original icon from vector geometry.
+
+The mark is original fan art (BSD-3-Clause, like the rest of the repo): a gold
+comic burst behind a blue roundel with a white star, in the All Stars palette.
+It uses no WWE logo, wordmark or likeness and nothing read from the game.
+
+This file is the source art. It writes, next to itself:
+  wweallstars.svg     the same geometry as a vector file, for previews and edits
+  wweallstars.ico     16, 20, 24, 30, 32, 36, 40, 48, 64 and 256 px; the 256
+                      entry PNG-compressed, the others 32-bit DIBs (Microsoft's
+                      guidance: only the 256 px image is compressed)
+  wweallstars-64.png  the 64 px image, for the launcher's title bar
+
+Run: python art/icon/make_icon.py  (needs Pillow)
+"""
+
+from __future__ import annotations
+
+import io
+import math
+import struct
+from pathlib import Path
+
+from PIL import Image, ImageDraw
+
+SIZES = (16, 20, 24, 30, 32, 36, 40, 48, 64, 256)
+SUPERSAMPLE = 1024
+
+INK = (11, 16, 32, 255)  # the launcher's dark base, #0B1020
+GOLD = (245, 180, 0, 255)  # #F5B400
+GOLD_LIGHT = (255, 214, 77, 255)  # #FFD64D
+BLUE = (29, 70, 200, 255)  # #1D46C8
+BLUE_LIGHT = (58, 108, 240, 255)  # #3A6CF0
+WHITE = (255, 247, 224, 255)  # #FFF7E0
+
+CENTRE = (0.5, 0.5)
+BURST_SPIKES = 12
+BURST_OUTER, BURST_INNER = 0.485, 0.385
+OUTLINE = 0.03
+DISC_RADIUS = 0.305
+STAR_OUTER, STAR_INNER = 0.225, 0.092
+
+
+def star_points(spikes: int, outer: float, inner: float, rotation: float = -90.0) -> list[tuple[float, float]]:
+    """Alternating outer and inner vertices around CENTRE, in unit coordinates."""
+    points = []
+    for i in range(spikes * 2):
+        radius = outer if i % 2 == 0 else inner
+        angle = math.radians(rotation + i * 180.0 / spikes)
+        points.append((CENTRE[0] + radius * math.cos(angle), CENTRE[1] + radius * math.sin(angle)))
+    return points
+
+
+def layers() -> list[tuple[str, object, tuple[int, int, int, int], bool]]:
+    """The mark, back to front: (kind, shape, colour, clipped).
+
+    kind is "polygon" (shape: points) or "circle" (shape: (cx, cy, r)); a
+    clipped layer is drawn only inside the blue disc. Outlines are drawn as a
+    slightly larger shape in INK under each shape.
+    """
+    burst_rotation = -90.0 + 180.0 / BURST_SPIKES / 2.0
+    return [
+        ("polygon", star_points(BURST_SPIKES, BURST_OUTER + OUTLINE * 0.5, BURST_INNER + OUTLINE * 0.5, burst_rotation), INK, False),
+        ("polygon", star_points(BURST_SPIKES, BURST_OUTER - OUTLINE * 0.5, BURST_INNER - OUTLINE * 0.5, burst_rotation), GOLD, False),
+        ("polygon", star_points(BURST_SPIKES, BURST_INNER - OUTLINE * 0.2, BURST_INNER - OUTLINE * 1.2, burst_rotation), GOLD_LIGHT, False),
+        ("circle", (CENTRE[0], CENTRE[1], DISC_RADIUS + OUTLINE), INK, False),
+        ("circle", (CENTRE[0], CENTRE[1], DISC_RADIUS), BLUE, False),
+        ("circle", (CENTRE[0] - 0.045, CENTRE[1] - 0.06, DISC_RADIUS * 0.72), BLUE_LIGHT, True),
+        ("polygon", star_points(5, STAR_OUTER + OUTLINE * 1.2, STAR_INNER + OUTLINE * 0.6), INK, False),
+        ("polygon", star_points(5, STAR_OUTER, STAR_INNER), WHITE, False),
+    ]
+
+
+def render(size: int) -> Image.Image:
+    canvas = Image.new("RGBA", (SUPERSAMPLE, SUPERSAMPLE), (0, 0, 0, 0))
+    scale = SUPERSAMPLE
+
+    def box(cx: float, cy: float, r: float) -> list[float]:
+        return [(cx - r) * scale, (cy - r) * scale, (cx + r) * scale, (cy + r) * scale]
+
+    disc = Image.new("L", canvas.size, 0)
+    ImageDraw.Draw(disc).ellipse(box(CENTRE[0], CENTRE[1], DISC_RADIUS), fill=255)
+    for kind, shape, colour, clipped in layers():
+        mask = Image.new("L", canvas.size, 0)
+        if kind == "polygon":
+            ImageDraw.Draw(mask).polygon([(x * scale, y * scale) for x, y in shape], fill=255)
+        else:
+            ImageDraw.Draw(mask).ellipse(box(*shape), fill=255)
+        if clipped:
+            mask = Image.composite(mask, Image.new("L", canvas.size, 0), disc)
+        canvas.paste(Image.new("RGBA", canvas.size, colour), (0, 0), mask)
+    return canvas.resize((size, size), Image.Resampling.LANCZOS)
+
+
+def svg() -> str:
+    def hex_colour(colour: tuple[int, int, int, int]) -> str:
+        return "#{:02X}{:02X}{:02X}".format(*colour[:3])
+
+    body = []
+    for kind, shape, colour, clipped in layers():
+        if kind == "polygon":
+            points = " ".join(f"{x * 256:.2f},{y * 256:.2f}" for x, y in shape)
+            body.append(f'  <polygon points="{points}" fill="{hex_colour(colour)}"/>')
+        else:
+            cx, cy, r = shape
+            clip = ' clip-path="url(#disc)"' if clipped else ""
+            body.append(f'  <circle cx="{cx * 256:.2f}" cy="{cy * 256:.2f}" r="{r * 256:.2f}" fill="{hex_colour(colour)}"{clip}/>')
+    disc = f'<circle cx="{CENTRE[0] * 256:.2f}" cy="{CENTRE[1] * 256:.2f}" r="{DISC_RADIUS * 256:.2f}"/>'
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">\n'
+        "  <!-- Generated by make_icon.py; edit the geometry there. BSD-3-Clause. -->\n"
+        f'  <defs><clipPath id="disc">{disc}</clipPath></defs>\n' + "\n".join(body) + "\n</svg>\n"
+    )
+
+
+def dib(image: Image.Image) -> bytes:
+    """A 32-bit BGRA DIB with an empty AND mask, as an ICO entry holds it."""
+    width, height = image.size
+    header = struct.pack("<IiiHHIIiiII", 40, width, height * 2, 1, 32, 0, 0, 0, 0, 0, 0)
+    pixels = image.tobytes("raw", "BGRA")
+    stride = width * 4
+    rows = b"".join(pixels[y * stride:(y + 1) * stride] for y in reversed(range(height)))
+    mask_stride = ((width + 31) // 32) * 4
+    return header + rows + bytes(mask_stride * height)
+
+
+def png(image: Image.Image) -> bytes:
+    out = io.BytesIO()
+    image.save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
+def ico(images: dict[int, Image.Image]) -> bytes:
+    entries = [(size, png(images[size]) if size == 256 else dib(images[size])) for size in SIZES]
+    offset = 6 + 16 * len(entries)
+    directory = struct.pack("<HHH", 0, 1, len(entries))
+    data = b""
+    for size, payload in entries:
+        side = 0 if size == 256 else size
+        directory += struct.pack("<BBBBHHII", side, side, 0, 0, 1, 32, len(payload), offset + len(data))
+        data += payload
+    return directory + data
+
+
+def main() -> None:
+    here = Path(__file__).resolve().parent
+    images = {size: render(size) for size in SIZES}
+    (here / "wweallstars.ico").write_bytes(ico(images))
+    (here / "wweallstars-64.png").write_bytes(png(images[64]))
+    (here / "wweallstars.svg").write_text(svg(), encoding="utf-8", newline="\n")
+    print(f"Wrote {here / 'wweallstars.ico'} ({', '.join(map(str, SIZES))} px)")
+
+
+if __name__ == "__main__":
+    main()

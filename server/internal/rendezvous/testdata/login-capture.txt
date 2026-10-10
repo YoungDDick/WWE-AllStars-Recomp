@@ -1,0 +1,7 @@
+# PRUDP v0 packets the game (base XEX v5) sent to the Rendez-Vous auth port, captured by
+# scripts/online_listener.py --respond in analysis/session-online-rv2/listener.log
+# (2026-10-05). Checksums use the title's access key; tests derive its byte sum from them.
+syn 3f312000 00000000 0000 00000000 f0
+connect 3f3131a1 5167db30 0100 cdb3de3e 03
+login 3f3132a15167db30020000 0f9744db13752a5005a260fd2a16f7b1aa2583879793
+ping 3f3124a1 5167db30 0100 59

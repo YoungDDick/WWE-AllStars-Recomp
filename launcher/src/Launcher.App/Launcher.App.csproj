@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The Avalonia app: views over the launcher core, published as one Native AOT exe. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <RootNamespace>WweAllStars.Launcher</RootNamespace>
+    <AssemblyName>WWEAllStarsLauncher</AssemblyName>
+    <AssemblyTitle>WWE All Stars Recomp launcher</AssemblyTitle>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- The project's original icon, shared with the game exe (art/icon/make_icon.py). -->
+    <ApplicationIcon>../../../art/icon/wweallstars.ico</ApplicationIcon>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <BuiltInComInteropSupport>false</BuiltInComInteropSupport>
+    <PublishAot>true</PublishAot>
+    <TrimMode>full</TrimMode>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia" />
+    <PackageReference Include="Avalonia.Desktop" />
+    <PackageReference Include="Avalonia.Themes.Fluent" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Window icon and title-bar mark. -->
+    <AvaloniaResource Include="../../../art/icon/wweallstars.ico" Link="Assets/wweallstars.ico" />
+    <AvaloniaResource Include="../../../art/icon/wweallstars-64.png" Link="Assets/wweallstars-64.png" />
+    <!-- Bundled display and body fonts (SIL Open Font License); never loaded from C:/Windows/Fonts. -->
+    <AvaloniaResource Include="Assets/Fonts/*.ttf" />
+    <!-- The About screen's third-party licences. -->
+    <AvaloniaResource Include="../../THIRD-PARTY-NOTICES.txt" Link="Assets/THIRD-PARTY-NOTICES.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The screenshot tool sets the launcher's options before it opens the window. -->
+    <InternalsVisibleTo Include="Launcher.Screenshots" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Launcher.Core/Launcher.Core.csproj" />
+  </ItemGroup>
+</Project>

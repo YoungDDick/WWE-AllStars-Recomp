@@ -1,0 +1,328 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="WweAllStars.Launcher.MainWindow"
+        Title="WWE All Stars Recomp"
+        Icon="/Assets/wweallstars.ico"
+        Width="1100" Height="640" MinWidth="860" MinHeight="540"
+        WindowStartupLocation="CenterScreen"
+        Background="Transparent"
+        TransparencyLevelHint="Mica, AcrylicBlur, None"
+        ExtendClientAreaToDecorationsHint="True"
+        ExtendClientAreaChromeHints="NoChrome"
+        ExtendClientAreaTitleBarHeightHint="-1">
+  <Grid RowDefinitions="36,*">
+    <!-- The base: translucent over the system material on Windows 11, solid elsewhere (MainWindow.ApplyMaterial). -->
+    <Border Grid.RowSpan="2" Background="{DynamicResource BaseBrush}" />
+
+    <!-- Typographic backdrop: the welcome screen, and the home screen when the disc's key art cannot be read. -->
+    <Panel x:Name="Backdrop" Grid.RowSpan="2" ClipToBounds="True">
+      <Panel.Background>
+        <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
+          <GradientStop Offset="0" Color="#000B1020" />
+          <GradientStop Offset="0.55" Color="#9912204A" />
+          <GradientStop Offset="1" Color="#E61B3A8C" />
+        </LinearGradientBrush>
+      </Panel.Background>
+      <!-- Speed lines and bursts in the corners, in the comic style of the game's menus. -->
+      <Path Data="M0,0 L1,0 L0.35,1 L0,1 Z" Stretch="Fill" Width="520" HorizontalAlignment="Left"
+            Fill="#142F6BFF" />
+      <Path Data="M0.6,0 L1,0 L1,1 L0,1 Z" Stretch="Fill" Width="460" HorizontalAlignment="Right"
+            Fill="#122F6BFF" />
+      <Path Data="{StaticResource BigBurst}" Stretch="Uniform" Width="560" Height="560"
+            HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,-170,-190"
+            Fill="#2E2F6BFF" x:Name="BigBackdropBurst">
+        <Path.RenderTransform><RotateTransform /></Path.RenderTransform>
+      </Path>
+      <Path Data="{StaticResource SmallBurst}" Stretch="Uniform" Width="220" Height="220"
+            HorizontalAlignment="Left" VerticalAlignment="Top" Margin="-60,-50,0,0"
+            Fill="#66F5B800" x:Name="SmallBackdropBurst">
+        <Path.RenderTransform><RotateTransform /></Path.RenderTransform>
+      </Path>
+    </Panel>
+
+    <!-- The game's own key art from the player's disc, full-bleed, slowly panning and zooming. -->
+    <Panel x:Name="KeyArtLayer" Grid.RowSpan="2" ClipToBounds="True" IsVisible="False">
+      <Image x:Name="KeyArtImage" Stretch="UniformToFill"
+             RenderTransformOrigin="50%,30%" RenderOptions.BitmapInterpolationMode="HighQuality">
+        <Image.RenderTransform>
+          <TransformGroup>
+            <ScaleTransform />
+            <TranslateTransform />
+          </TransformGroup>
+        </Image.RenderTransform>
+      </Image>
+      <!-- Scrims keep the title bar and the controls readable over any part of the art. -->
+      <Border Height="72" VerticalAlignment="Top">
+        <Border.Background>
+          <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+            <GradientStop Offset="0" Color="#B3070A14" />
+            <GradientStop Offset="1" Color="#00070A14" />
+          </LinearGradientBrush>
+        </Border.Background>
+      </Border>
+      <Border Height="190" VerticalAlignment="Bottom">
+        <Border.Background>
+          <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+            <GradientStop Offset="0" Color="#00070A14" />
+            <GradientStop Offset="0.55" Color="#B3070A14" />
+            <GradientStop Offset="1" Color="#F2070A14" />
+          </LinearGradientBrush>
+        </Border.Background>
+      </Border>
+    </Panel>
+
+    <!-- Custom title bar: the whole strip drags the window; minimise and close on the right. -->
+    <Grid x:Name="TitleBar" Grid.Row="0" ColumnDefinitions="Auto,*,Auto,Auto" Background="#01070A14">
+      <Image Grid.Column="0" Margin="10,0,0,0" Width="20" Height="20" VerticalAlignment="Center"
+             Source="/Assets/wweallstars-64.png" RenderOptions.BitmapInterpolationMode="HighQuality" />
+      <TextBlock Grid.Column="1" Margin="10,0" VerticalAlignment="Center"
+                 Text="WWE ALL STARS  ·  RECOMP" FontSize="14" FontWeight="Bold"
+                 LetterSpacing="3" Foreground="#C9D3F0" />
+      <Button Grid.Column="2" x:Name="MinimizeButton" Classes="chrome" ToolTip.Tip="Minimise" IsTabStop="True">
+        <Path Data="M0,5 L10,5" Width="10" Height="10" Stroke="{Binding $parent[Button].Foreground}" StrokeThickness="1" />
+      </Button>
+      <Button Grid.Column="3" x:Name="CloseButton" Classes="chrome close" ToolTip.Tip="Close" IsTabStop="True">
+        <Path Data="M0,0 L10,10 M10,0 L0,10" Width="10" Height="10" Stroke="{Binding $parent[Button].Foreground}" StrokeThickness="1" />
+      </Button>
+    </Grid>
+
+    <Grid Grid.Row="1">
+      <!-- First run: the original typographic welcome screen and setup from the player's ISO. -->
+      <ScrollViewer x:Name="SetupView" IsVisible="False" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="10"
+                    Width="720" Margin="0,8,0,24">
+          <TextBlock Classes="display" Text="WWE" HorizontalAlignment="Center" FontSize="30"
+                     LetterSpacing="14" Foreground="{StaticResource GoldBrush}" />
+          <TextBlock Classes="display" Text="ALL STARS" HorizontalAlignment="Center" FontSize="88"
+                     LetterSpacing="4" Margin="0,-14,0,0" RenderTransform="skewX(-8deg)" />
+          <TextBlock x:Name="SetupKicker" Classes="kicker" Text="FIRST-TIME SETUP" HorizontalAlignment="Center" Margin="0,-6,0,6" />
+          <TextBlock x:Name="SetupIntroText" Classes="body" TextAlignment="Center" TextWrapping="Wrap"
+                     Text="To play, you need a disc image (.iso) of your own WWE All Stars Xbox 360 disc and its Title Update 2. Setup checks both, copies and verifies the game files, and never changes your disc image or update file. Nothing of the game is included with the port." />
+
+          <Border x:Name="DropZone" DragDrop.AllowDrop="True" Background="#660B1020"
+                  BorderBrush="#4A6BC4" BorderThickness="2" CornerRadius="4" Padding="18" Margin="0,8,0,0">
+            <StackPanel Spacing="8">
+              <TextBlock HorizontalAlignment="Center" FontSize="18" FontWeight="Bold" Foreground="White"
+                         Text="Drop your disc image here, or" />
+              <Button x:Name="ChooseImageButton" Classes="secondary" HorizontalAlignment="Center"
+                      Content="Choose disc image…" />
+              <TextBlock x:Name="ImagePathText" Classes="small" HorizontalAlignment="Center" TextWrapping="Wrap"
+                         TextAlignment="Center" Text="No disc image chosen" />
+            </StackPanel>
+          </Border>
+
+          <!-- Title Update 2 (tu2-dlc spec): a package, a folder or an archive, dumped from the player's console. -->
+          <Border x:Name="TitleUpdateZone" DragDrop.AllowDrop="True" Background="#660B1020"
+                  BorderBrush="#4A6BC4" BorderThickness="2" CornerRadius="4" Padding="18">
+            <StackPanel Spacing="8">
+              <TextBlock HorizontalAlignment="Center" FontSize="18" FontWeight="Bold" Foreground="White"
+                         Text="Drop Title Update 2 here, or" />
+              <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="10">
+                <Button x:Name="ChooseTitleUpdateButton" Classes="secondary" Content="Choose update file…" />
+                <Button x:Name="ChooseTitleUpdateFolderButton" Classes="secondary" Content="Choose folder…" />
+              </StackPanel>
+              <TextBlock x:Name="TitleUpdatePathText" Classes="small" HorizontalAlignment="Center" TextWrapping="Wrap"
+                         TextAlignment="Center" Text="No title update chosen" />
+              <TextBlock x:Name="TitleUpdateHelpText" Classes="small" HorizontalAlignment="Center" TextWrapping="Wrap"
+                         TextAlignment="Center" />
+            </StackPanel>
+          </Border>
+
+          <!-- Optional: DLC packs, installed after Title Update 2. -->
+          <Border x:Name="SetupDlcZone" DragDrop.AllowDrop="True" Background="#440B1020"
+                  BorderBrush="#33507A" BorderThickness="1" CornerRadius="4" Padding="14">
+            <StackPanel Spacing="6">
+              <TextBlock HorizontalAlignment="Center" FontSize="16" FontWeight="Bold" Foreground="White"
+                         Text="Add DLC (you can do this later)" />
+              <Button x:Name="SetupDlcButton" Classes="secondary" HorizontalAlignment="Center" Content="Choose DLC…" />
+              <TextBlock x:Name="SetupDlcText" Classes="small" HorizontalAlignment="Center" TextWrapping="Wrap"
+                         TextAlignment="Center" Text="No DLC chosen. Pick several packs at once, or add more one by one." />
+            </StackPanel>
+          </Border>
+
+          <Grid x:Name="GameFolderRow" ColumnDefinitions="Auto,*,Auto" Margin="0,4,0,0">
+            <TextBlock Grid.Column="0" Classes="kicker" VerticalAlignment="Center" LetterSpacing="2"
+                       Text="GAME FILES GO TO  " />
+            <TextBlock Grid.Column="1" x:Name="GameDataText" VerticalAlignment="Center" FontSize="15"
+                       Foreground="{StaticResource TextBrush}" TextTrimming="PrefixCharacterEllipsis" />
+            <Button Grid.Column="2" x:Name="ChooseFolderButton" Classes="secondary" Content="Change…"
+                    Margin="8,0,0,0" />
+          </Grid>
+
+          <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="14" Margin="0,10,0,0">
+            <Button x:Name="StartSetupButton" Classes="play" FontSize="30" Padding="44,2,44,6" Content="SET UP" />
+            <Button x:Name="RestartSetupButton" Classes="secondary" VerticalAlignment="Center" IsVisible="False"
+                    Content="Start over" />
+            <Button x:Name="CancelSetupButton" Classes="secondary" VerticalAlignment="Center" IsVisible="False"
+                    Content="Cancel" />
+          </StackPanel>
+
+          <ProgressBar x:Name="SetupProgressBar" IsVisible="False" Minimum="0" Maximum="1" Height="8"
+                       Foreground="{StaticResource GoldBrush}" Background="#22305A" />
+          <TextBlock x:Name="SetupDetailText" HorizontalAlignment="Center" TextAlignment="Center"
+                     TextTrimming="CharacterEllipsis" FontSize="15" Foreground="{StaticResource TextBrush}" />
+          <TextBlock x:Name="SetupStatusText" Classes="body" HorizontalAlignment="Center" TextAlignment="Center" />
+        </StackPanel>
+      </ScrollViewer>
+
+      <!-- Home: Play and its status line bottom right, the smaller actions bottom left. -->
+      <Grid x:Name="HomeView" ColumnDefinitions="*,Auto" Margin="28,0,32,26" VerticalAlignment="Bottom">
+        <!-- The title, only when there is no key art to carry it. -->
+        <StackPanel x:Name="HomeTitle" Grid.ColumnSpan="2" HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                    Margin="0,0,0,120">
+          <TextBlock Classes="display" Text="WWE" FontSize="34" LetterSpacing="14"
+                     Foreground="{StaticResource GoldBrush}" />
+          <TextBlock Classes="display" Text="ALL STARS" FontSize="104" LetterSpacing="4"
+                     Margin="0,-18,0,0" RenderTransform="skewX(-8deg)" />
+          <TextBlock Classes="kicker" Text="STATIC RECOMPILATION FOR PC" Margin="4,-8,0,0" />
+        </StackPanel>
+
+        <!-- Wraps to a second row when the optional actions and a long status line need the room (ticket 26). -->
+        <WrapPanel x:Name="HomeActions" Grid.Column="0" Orientation="Horizontal" ItemSpacing="10" LineSpacing="10"
+                   VerticalAlignment="Bottom" Margin="0,0,24,8">
+          <Button x:Name="SettingsButton" Classes="action" Content="SETTINGS"
+                  ToolTip.Tip="Launcher and startup settings" />
+          <!-- The player's DLC packs (tu2-dlc ticket 05). -->
+          <Button x:Name="DlcButton" Classes="action" Content="DLC"
+                  ToolTip.Tip="Add or remove DLC packs you dumped from your own console" />
+          <Button x:Name="OpenLogsButton" Classes="action" Content="OPEN LOGS"
+                  ToolTip.Tip="Open the folder with the latest session's log" />
+          <!-- Shown when the shader pack is missing, stale or lacks shaders the game found (ticket 10). -->
+          <Button x:Name="PrepareShadersButton" Classes="action" Content="PREPARE SHADERS" IsVisible="False"
+                  ToolTip.Tip="Convert the game's shaders for the Native renderer (about a minute)" />
+          <!-- Shown after a session fell back to Emulated for a reason other than the shader pack (ticket 20). -->
+          <Button x:Name="SwitchToEmulatedButton" Classes="action" Content="SWITCH TO EMULATED" IsVisible="False"
+                  ToolTip.Tip="Start the game on the Emulated renderer from now on (change it back in Settings)" />
+          <!-- Desktop and Start shortcuts with the title tile from the player's disc (ticket 15). -->
+          <Button x:Name="CreateShortcutsButton" Classes="action" Content="SHORTCUTS"
+                  ToolTip.Tip="Add WWE All Stars to the desktop and the Start menu" />
+          <!-- Re-verifies the game files and re-extracts only the bad ones from the disc image. -->
+          <Button x:Name="RepairButton" Classes="action" Content="REPAIR"
+                  ToolTip.Tip="Check every game file and fix the missing or damaged ones from your disc image" />
+          <Button x:Name="CancelRepairButton" Classes="action" Content="CANCEL REPAIR" IsVisible="False" />
+          <Button x:Name="AboutButton" Classes="action" Content="ABOUT" />
+          <Button x:Name="ExitButton" Classes="action" Content="EXIT"
+                  ToolTip.Tip="Close the launcher. A running game keeps running." />
+        </WrapPanel>
+
+        <StackPanel Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Bottom" Spacing="6">
+          <Panel HorizontalAlignment="Right">
+            <Path Data="{StaticResource BigBurst}" Stretch="Uniform" Width="164" Height="164"
+                  HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-50,0,-50"
+                  Fill="#D92F6BFF" Stroke="#070A14" StrokeThickness="3" x:Name="PlayBurst" IsHitTestVisible="False">
+              <Path.RenderTransform><RotateTransform /></Path.RenderTransform>
+            </Path>
+            <Button x:Name="PlayButton" Classes="play" Content="PLAY" FontSize="50" Padding="52,0,52,6"
+                    HorizontalAlignment="Center" VerticalAlignment="Center" />
+          </Panel>
+          <!-- Status line: ready, game running, how the last session ended. -->
+          <TextBlock x:Name="StatusText" HorizontalAlignment="Right" MaxWidth="460" Margin="0,14,0,0"
+                     TextWrapping="Wrap" TextAlignment="Right" FontSize="17" FontWeight="SemiBold"
+                     Foreground="{StaticResource TextBrush}" Text="Ready to play" />
+          <!-- With online play on: whether the game server answers. Play works in every status. -->
+          <StackPanel x:Name="OnlineStatus" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10"
+                      IsVisible="False">
+            <TextBlock x:Name="OnlineStatusText" MaxWidth="400" TextWrapping="Wrap" TextAlignment="Right"
+                       VerticalAlignment="Center" FontSize="14" Foreground="{StaticResource TextBrush}" />
+            <Button x:Name="OnlineRetryButton" Classes="link" Content="Retry" VerticalAlignment="Center"
+                    ToolTip.Tip="Ask the game server again" />
+          </StackPanel>
+          <ProgressBar x:Name="RepairProgressBar" IsVisible="False" Minimum="0" Maximum="1" Height="6"
+                       Width="320" HorizontalAlignment="Right"
+                       Foreground="{StaticResource GoldBrush}" Background="#22305A" />
+          <ProgressBar x:Name="ShaderProgressBar" IsVisible="False" Minimum="0" Maximum="1" Height="6"
+                       Width="320" HorizontalAlignment="Right"
+                       Foreground="{StaticResource GoldBrush}" Background="#22305A" />
+          <!-- The game's prepare-pipelines mode, before Play or after Repair (zero-stutter ticket 07). -->
+          <ProgressBar x:Name="PipelineProgressBar" IsVisible="False" Minimum="0" Maximum="1" Height="6"
+                       Width="320" HorizontalAlignment="Right"
+                       Foreground="{StaticResource GoldBrush}" Background="#22305A" />
+          <!-- Shown only when GitHub has a newer release; opens its page, downloads nothing. -->
+          <Button x:Name="UpdateLink" Classes="link" IsVisible="False" HorizontalAlignment="Right" />
+        </StackPanel>
+      </Grid>
+
+      <!-- Panels slide over the right side of the home screen; Esc or Back closes them. -->
+      <Border x:Name="PanelScrim" Background="#80070A14" IsVisible="False" />
+      <Border x:Name="SettingsView" IsVisible="False" Width="600" HorizontalAlignment="Right"
+              Background="{DynamicResource PanelBrush}" BorderBrush="{StaticResource BlueBrush}"
+              BorderThickness="3,0,0,0">
+        <DockPanel Margin="28,20,28,24">
+          <Grid DockPanel.Dock="Bottom" ColumnDefinitions="*,Auto,Auto" Margin="0,12,0,0">
+            <TextBlock x:Name="SettingsStatus" Grid.Column="0" Classes="small" VerticalAlignment="Center"
+                       TextWrapping="Wrap" />
+            <Button x:Name="ResetSettingsButton" Grid.Column="1" Classes="secondary" Content="Reset to defaults"
+                    Margin="0,0,10,0" />
+            <Button x:Name="CloseSettingsButton" Grid.Column="2" Classes="secondary" Content="Back" />
+          </Grid>
+          <TextBlock DockPanel.Dock="Top" Classes="display" Text="SETTINGS" FontSize="44" />
+          <ScrollViewer HorizontalScrollBarVisibility="Disabled" Margin="0,6,0,0">
+            <StackPanel Spacing="4" Margin="0,0,16,0">
+              <!-- The game's startup settings, built from its exported list (ticket 07). -->
+              <TextBlock Classes="small" TextWrapping="Wrap"
+                         Text="Used when the game starts. You can also change them in game on the PC SETTINGS page (F4)." />
+              <StackPanel x:Name="SettingsList" Spacing="4" />
+              <TextBlock x:Name="LauncherHeading" Classes="kicker" Text="LAUNCHER" Margin="0,18,0,6" />
+              <CheckBox x:Name="CheckForUpdates" Content="Check for updates at start" FontSize="17"
+                        Foreground="{StaticResource TextBrush}" />
+              <TextBlock x:Name="UpdateNote" Classes="small" TextWrapping="Wrap"
+                         Text="Asks GitHub once per launch whether a newer release exists, and shows a link. Nothing is downloaded." />
+            </StackPanel>
+          </ScrollViewer>
+        </DockPanel>
+      </Border>
+      <Border x:Name="DlcView" IsVisible="False" Width="560" HorizontalAlignment="Right" DragDrop.AllowDrop="True"
+              Background="{DynamicResource PanelBrush}" BorderBrush="{StaticResource GoldBrush}"
+              BorderThickness="3,0,0,0">
+        <DockPanel Margin="28,20,28,24">
+          <Button x:Name="CloseDlcButton" DockPanel.Dock="Bottom" Classes="secondary" Content="Back"
+                  HorizontalAlignment="Right" Margin="0,12,0,0" />
+          <StackPanel DockPanel.Dock="Top" Spacing="8">
+            <TextBlock Classes="display" Text="DLC" FontSize="44" />
+            <TextBlock Classes="body" TextWrapping="Wrap"
+                       Text="Add DLC packs you dumped from your own Xbox 360: a package file, a folder (a USB or Content folder works), or a zip, 7z or rar. Each pack is checked block by block and unpacked into the game's content folder; your file is not changed or kept. Nothing is included with the port." />
+            <StackPanel Orientation="Horizontal" Spacing="10">
+              <Button x:Name="AddDlcButton" Classes="secondary" Content="Add DLC file…" />
+              <Button x:Name="AddDlcFolderButton" Classes="secondary" Content="Add folder…" />
+              <Button x:Name="CancelDlcButton" Classes="secondary" Content="Cancel" IsVisible="False" />
+            </StackPanel>
+            <ProgressBar x:Name="DlcProgressBar" IsVisible="False" Minimum="0" Maximum="1" Height="6"
+                         Foreground="{StaticResource GoldBrush}" Background="#22305A" />
+            <TextBlock x:Name="DlcStatusText" Classes="body" TextWrapping="Wrap" />
+            <TextBlock Classes="kicker" Text="INSTALLED" Margin="0,8,0,0" />
+          </StackPanel>
+          <ScrollViewer x:Name="DlcScroll" HorizontalScrollBarVisibility="Disabled" Focusable="True">
+            <StackPanel x:Name="DlcList" Spacing="8" />
+          </ScrollViewer>
+        </DockPanel>
+      </Border>
+      <Border x:Name="AboutView" IsVisible="False" Width="520" HorizontalAlignment="Right"
+              Background="{DynamicResource PanelBrush}" BorderBrush="{StaticResource GoldBrush}"
+              BorderThickness="3,0,0,0">
+        <DockPanel Margin="28,20,28,24">
+          <Button x:Name="CloseAboutButton" DockPanel.Dock="Bottom" Classes="secondary" Content="Back"
+                  HorizontalAlignment="Right" Margin="0,12,0,0" />
+          <StackPanel DockPanel.Dock="Top" Spacing="6">
+            <TextBlock Classes="display" Text="ABOUT" FontSize="44" />
+            <TextBlock x:Name="VersionText" FontSize="18" FontWeight="Bold" Foreground="{StaticResource GoldBrush}" />
+            <TextBlock Classes="body"
+                       Text="An unofficial, fan-made static recompilation of WWE All Stars for PC. Not affiliated with or endorsed by WWE, THQ, Yuke's or Microsoft." />
+            <TextBlock Classes="body"
+                       Text="No game data is included. Setup copies the game files from your own disc image, and the key art on the home screen is read from those files on your PC." />
+            <TextBlock Classes="body" Text="The launcher and the port are licensed under the BSD 3-Clause licence." />
+            <TextBlock Classes="kicker" Text="ONLINE PLAY" Margin="0,10,0,0" />
+            <TextBlock Classes="body"
+                       Text="Online play is off until you turn it on in Settings. While it is on, the game server keeps your player name, an ID made for this install, and your internet and home network addresses, so other players can find and reach your matches. It keeps them in memory only: they are gone when the server restarts. Players see each other's matches only when both run the same version and commit." />
+            <TextBlock Classes="kicker" Text="THIRD-PARTY LICENCES" Margin="0,10,0,0" />
+          </StackPanel>
+          <Border Background="#66070A14" CornerRadius="2" Padding="12,8">
+            <ScrollViewer x:Name="NoticesScroll" HorizontalScrollBarVisibility="Disabled" Focusable="True">
+              <SelectableTextBlock x:Name="NoticesText" FontSize="13" TextWrapping="Wrap"
+                                   Foreground="{StaticResource MutedBrush}" />
+            </ScrollViewer>
+          </Border>
+        </DockPanel>
+      </Border>
+    </Grid>
+  </Grid>
+</Window>

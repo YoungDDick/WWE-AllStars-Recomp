@@ -1,0 +1,210 @@
+<!--
+  The All Stars look: bold condensed display type (Anton) and condensed body type (Barlow
+  Condensed), both bundled under the SIL Open Font License; blue and gold on a dark base; comic
+  bursts drawn in vector. No game art: the key art is read from the player's disc at runtime.
+-->
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Styles.Resources>
+    <FontFamily x:Key="DisplayFont">avares://WWEAllStarsLauncher/Assets/Fonts#Anton</FontFamily>
+    <FontFamily x:Key="BodyFont">avares://WWEAllStarsLauncher/Assets/Fonts#Barlow Condensed</FontFamily>
+
+    <Color x:Key="Ink">#070A14</Color>
+    <Color x:Key="Navy">#0B1020</Color>
+    <Color x:Key="Gold">#F5B800</Color>
+    <SolidColorBrush x:Key="GoldBrush" Color="#F5B800" />
+    <SolidColorBrush x:Key="GoldHotBrush" Color="#FFD23F" />
+    <SolidColorBrush x:Key="BlueBrush" Color="#2F6BFF" />
+    <SolidColorBrush x:Key="SkyBrush" Color="#8CB4FF" />
+    <SolidColorBrush x:Key="TextBrush" Color="#E6ECFF" />
+    <SolidColorBrush x:Key="MutedBrush" Color="#9AA8D0" />
+    <!-- The window base; MainWindow makes it translucent when the system material is active. -->
+    <SolidColorBrush x:Key="BaseBrush" Color="#0B1020" />
+    <SolidColorBrush x:Key="PanelBrush" Color="#F00B1020" />
+
+    <!-- Comic bursts, drawn once and scaled with Stretch. -->
+    <StreamGeometry x:Key="BigBurst">M200.0,0.0 L232.4,58.1 L281.6,30.6 L289.0,88.4 L368.9,65.3 L322.4,141.1 L404.7,153.3 L340.0,200.0 L379.4,240.9 L329.9,262.6 L365.7,332.2 L285.5,307.3 L287.6,382.0 L233.3,346.0 L200.0,390.0 L168.8,336.5 L109.8,387.4 L117.9,302.9 L40.5,327.2 L63.8,265.6 L10.9,243.2 L53.0,200.0 L5.0,155.5 L84.0,144.1 L38.9,71.6 L107.5,84.0 L115.0,23.4 L168.5,62.1 Z</StreamGeometry>
+    <StreamGeometry x:Key="SmallBurst">M60.0,0.0 L72.3,22.1 L92.4,15.3 L91.7,37.0 L117.1,41.5 L99.9,60.0 L112.5,77.1 L91.7,83.0 L95.3,108.5 L72.3,97.9 L60.0,115.2 L47.9,97.2 L24.7,108.5 L27.7,83.5 L7.5,77.1 L20.9,60.0 L2.9,41.5 L27.7,36.5 L27.6,15.3 L47.9,22.8 Z</StreamGeometry>
+  </Styles.Resources>
+
+  <Style Selector="Window">
+    <Setter Property="FontFamily" Value="{StaticResource BodyFont}" />
+    <Setter Property="FontWeight" Value="Medium" />
+  </Style>
+
+  <!-- Type. -->
+  <Style Selector="TextBlock.display">
+    <Setter Property="FontFamily" Value="{StaticResource DisplayFont}" />
+    <Setter Property="FontWeight" Value="Normal" />
+    <Setter Property="Foreground" Value="White" />
+  </Style>
+  <Style Selector="TextBlock.kicker">
+    <Setter Property="FontWeight" Value="Bold" />
+    <Setter Property="FontSize" Value="14" />
+    <Setter Property="LetterSpacing" Value="5" />
+    <Setter Property="Foreground" Value="{StaticResource SkyBrush}" />
+  </Style>
+  <Style Selector="TextBlock.body">
+    <Setter Property="FontSize" Value="17" />
+    <Setter Property="TextWrapping" Value="Wrap" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+  <Style Selector="TextBlock.small">
+    <Setter Property="FontSize" Value="14" />
+    <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+  </Style>
+
+  <!-- Focus: a gold outline that keyboard users can follow (Tab, Enter). -->
+  <Style Selector="Button:focus-visible /template/ ContentPresenter">
+    <Setter Property="BorderBrush" Value="{StaticResource GoldHotBrush}" />
+    <Setter Property="BorderThickness" Value="2" />
+  </Style>
+  <Style Selector="CheckBox:focus-visible">
+    <Setter Property="BorderBrush" Value="{StaticResource GoldHotBrush}" />
+  </Style>
+
+  <!-- Title bar buttons. -->
+  <Style Selector="Button.chrome">
+    <Setter Property="Width" Value="46" />
+    <Setter Property="Height" Value="36" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Foreground" Value="#C9D3F0" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Button.chrome:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="#3322305A" />
+    <Setter Property="Foreground" Value="White" />
+  </Style>
+  <Style Selector="Button.close:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="#C42B1C" />
+    <Setter Property="Foreground" Value="White" />
+  </Style>
+
+  <!-- The big gold button: Play, and Set up on the welcome screen. Slanted like the game's menus. -->
+  <Style Selector="Button.play">
+    <Setter Property="Background" Value="{StaticResource GoldBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource Navy}" />
+    <Setter Property="FontFamily" Value="{StaticResource DisplayFont}" />
+    <Setter Property="FontWeight" Value="Normal" />
+    <Setter Property="FontSize" Value="44" />
+    <Setter Property="Padding" Value="64,4,64,8" />
+    <Setter Property="CornerRadius" Value="3" />
+    <Setter Property="BorderBrush" Value="{StaticResource Navy}" />
+    <Setter Property="BorderThickness" Value="3" />
+    <Setter Property="RenderTransform" Value="skewX(-8deg)" />
+  </Style>
+  <Style Selector="Button.play:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource GoldHotBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource Navy}" />
+    <Setter Property="BorderBrush" Value="{StaticResource Navy}" />
+  </Style>
+  <Style Selector="Button.play:pressed /template/ ContentPresenter">
+    <Setter Property="Background" Value="#D99F00" />
+  </Style>
+  <Style Selector="Button.play:disabled /template/ ContentPresenter">
+    <Setter Property="Background" Value="#5A5130" />
+    <Setter Property="Foreground" Value="#2A2A2A" />
+  </Style>
+  <Style Selector="Button.play:focus-visible /template/ ContentPresenter">
+    <Setter Property="BorderBrush" Value="White" />
+    <Setter Property="BorderThickness" Value="3" />
+  </Style>
+
+  <!-- Smaller actions: condensed caps on a dark slanted plate with a blue edge. -->
+  <Style Selector="Button.action">
+    <Setter Property="Background" Value="#CC0B1020" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource BlueBrush}" />
+    <Setter Property="BorderThickness" Value="0,0,0,3" />
+    <Setter Property="FontSize" Value="17" />
+    <Setter Property="FontWeight" Value="Bold" />
+    <Setter Property="Padding" Value="20,8" />
+    <Setter Property="CornerRadius" Value="2" />
+    <Setter Property="RenderTransform" Value="skewX(-8deg)" />
+  </Style>
+  <Style Selector="Button.action:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="#2F6BFF" />
+    <Setter Property="Foreground" Value="White" />
+    <Setter Property="BorderBrush" Value="{StaticResource GoldBrush}" />
+  </Style>
+  <Style Selector="Button.action:pressed /template/ ContentPresenter">
+    <Setter Property="Background" Value="#1D4FD0" />
+  </Style>
+
+  <!-- Plain secondary buttons on the welcome screen and in panels. -->
+  <Style Selector="Button.secondary">
+    <Setter Property="Background" Value="#3322305A" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="BorderBrush" Value="#4A6BC4" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="FontSize" Value="16" />
+    <Setter Property="FontWeight" Value="Bold" />
+    <Setter Property="Padding" Value="18,7" />
+    <Setter Property="CornerRadius" Value="2" />
+  </Style>
+  <Style Selector="Button.secondary:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="#2F6BFF" />
+    <Setter Property="Foreground" Value="White" />
+  </Style>
+
+  <Style Selector="Button.link">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Foreground" Value="{StaticResource GoldBrush}" />
+    <Setter Property="FontSize" Value="16" />
+    <Setter Property="FontWeight" Value="Bold" />
+    <Setter Property="Padding" Value="6,2" />
+    <Setter Property="Cursor" Value="Hand" />
+  </Style>
+  <Style Selector="Button.link:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="#3322305A" />
+    <Setter Property="Foreground" Value="{StaticResource GoldHotBrush}" />
+  </Style>
+
+  <!-- Letter spacing for the buttons' text (Button has no LetterSpacing of its own). -->
+  <Style Selector="Button.play /template/ ContentPresenter > TextBlock">
+    <Setter Property="LetterSpacing" Value="3" />
+  </Style>
+  <Style Selector="Button.action /template/ ContentPresenter > TextBlock">
+    <Setter Property="LetterSpacing" Value="2" />
+  </Style>
+  <Style Selector="Button.secondary /template/ ContentPresenter > TextBlock">
+    <Setter Property="LetterSpacing" Value="1" />
+  </Style>
+
+  <!-- Slow, code-driven motion: the key art pans and zooms, the bursts turn. The animated
+       elements carry the matching transforms (MainWindow.axaml); MainWindow.UpdateMotion adds
+       and removes these classes, so the motion runs only while the player looks at the launcher. -->
+  <Style Selector="Image.kenburns">
+    <Style.Animations>
+      <Animation Duration="0:0:45" IterationCount="Infinite" PlaybackDirection="Alternate" Easing="SineEaseInOut">
+        <KeyFrame Cue="0%">
+          <Setter Property="ScaleTransform.ScaleX" Value="1.03" />
+          <Setter Property="ScaleTransform.ScaleY" Value="1.03" />
+          <Setter Property="TranslateTransform.X" Value="0" />
+          <Setter Property="TranslateTransform.Y" Value="0" />
+        </KeyFrame>
+        <KeyFrame Cue="100%">
+          <Setter Property="ScaleTransform.ScaleX" Value="1.12" />
+          <Setter Property="ScaleTransform.ScaleY" Value="1.12" />
+          <Setter Property="TranslateTransform.X" Value="-22" />
+          <Setter Property="TranslateTransform.Y" Value="-6" />
+        </KeyFrame>
+      </Animation>
+    </Style.Animations>
+  </Style>
+  <Style Selector="Path.spin">
+    <Style.Animations>
+      <Animation Duration="0:1:30" IterationCount="Infinite">
+        <KeyFrame Cue="0%">
+          <Setter Property="RotateTransform.Angle" Value="0" />
+        </KeyFrame>
+        <KeyFrame Cue="100%">
+          <Setter Property="RotateTransform.Angle" Value="360" />
+        </KeyFrame>
+      </Animation>
+    </Style.Animations>
+  </Style>
+</Styles>

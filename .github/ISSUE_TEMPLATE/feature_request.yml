@@ -1,0 +1,11 @@
+name: Idea or request
+description: Something the PC version could do better.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like
+      description: What it should do, and why it matters when you play.
+    validations:
+      required: true

@@ -1,0 +1,309 @@
+<p align="center">
+  <img src="docs/images/banner.jpg" alt="WWE All Stars Recomp: an unofficial PC port of the Xbox 360 game, statically recompiled to native x86-64 with a Vulkan renderer" width="100%">
+</p>
+
+An unofficial Windows version of WWE All Stars (Xbox 360, 2011). The game's PowerPC code
+is translated ahead of time to native x86-64 with [ReXGlue](https://github.com/rexglue/rexglue-sdk),
+and a native Vulkan renderer draws the game's own Direct3D 9 calls. It is not an emulator
+you load a disc into: the game runs as a normal Windows program, and the launcher copies
+the game files from your disc image once.
+
+**This repository and its releases contain no game files.** You need your own Xbox 360
+disc image of WWE All Stars (USA/Europe) and its Title Update 2, both dumped from your own
+console. DLC is optional and comes from your console too. The launcher checks every file
+and refuses anything else.
+
+**[Download the latest release](../../releases/latest)** · [What works](#what-works) ·
+[Install](#play-it) · [FAQ](#faq) · [Build from source](#build-from-source)
+
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=VIDEO_ID">
+    <img src="docs/images/video-thumbnail.jpg" alt="Video: boot to pinfall, one full match, unedited" width="70%">
+  </a>
+  <br>
+  <sub>Boot to pinfall, one full Exhibition match, unedited (YouTube, 5:35)</sub>
+</p>
+
+## What works
+
+| | |
+| --- | --- |
+| Tested and playable | Exhibition 1v1 with entrances, finishers and the result screen; Path of Champions; Fantasy Warfare; Create a Superstar; 4 local players; DLC wrestlers (Million Dollar Pack); online Player Match |
+| Tested hardware | Windows 11 with an AMD Radeon RX 7900 XT; Steam Deck |
+| Not tested yet | NVIDIA and Intel GPUs, Windows 10, Linux and Proton on a desktop |
+| Not supported | Ranked Match and leaderboards; the in-game store (add DLC from the launcher) |
+
+The game runs at its original 60 frames per second. Anything not listed above may still
+crash; an [issue](../../issues/new/choose) with the session log attached helps fix it.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/shot-entrance.jpg" alt="CM Punk's entrance"></td>
+    <td width="50%"><img src="docs/images/shot-match.jpg" alt="Chris Jericho and CM Punk mid-match, both health bars visible"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/shot-finisher.jpg" alt="CM Punk's finisher in slow motion"></td>
+    <td><img src="docs/images/shot-select.jpg" alt="Character select: Chris Jericho against John Cena"></td>
+  </tr>
+</table>
+
+## What the PC version adds
+
+### A native renderer
+
+The Native renderer intercepts the game's Direct3D 9 calls and draws them with Vulkan,
+instead of emulating the Xbox 360 GPU. It is the default. The emulated renderer from
+ReXGlue stays available as **Emulated**, as a fallback and as a reference.
+
+Native adds image options the console never had:
+
+- **Supersampling**: renders 2x2 and filters down, which is the anti-aliasing (on by default)
+- **Render resolution**: 720p, 1440p or 2160p
+- **Sharpening** with AMD FidelityFX CAS: Off, Low, Medium or High
+- **Texture filtering**: anisotropic, up to 16x
+- **Colour**: *Original* keeps the Xbox 360's gamma curve, as in Xenia; *Natural* uses sRGB
+  for more detail in dark areas
+- **Graphics presets** Low, Medium and High. On first start the game suggests one from your
+  GPU: Low for a Steam Deck or an integrated GPU, Medium for a small discrete GPU, High otherwise.
+
+### Shaders built before you play
+
+Setup converts the game's shaders once, then builds every pipeline the game is known to
+use before the first match, on all CPU cores. On GPUs with graphics pipeline libraries, a
+pipeline that wasn't built ahead is linked from prebuilt parts instead of compiled on the
+spot. The game paces itself at an even 60 Hz and can follow your display's refresh.
+
+### Settings inside the game
+
+Press **F4**, or click both sticks, to open the PC SETTINGS page over the game. It is also
+a row in the game's own OPTIONS menu. Display mode, VSync, sharpening, texture filtering,
+sound and vibration change at once; the rest apply at the next start. The launcher and the
+game share one settings file.
+
+### Enhanced vibration
+
+The Xbox 360 game rumbles only for aerial hits. **Enhanced** vibration, the default, gives
+every hit a pulse sized by the kind of move, plus finishers landing on you, slams to the
+mat, your own hits connecting, reversals and critical health. **Original** keeps the
+console's behaviour, and a strength setting scales both.
+
+### Online Player Match (experimental)
+
+<img src="docs/images/shot-online-lobby.jpg" alt="The Xbox LIVE Player Match lobby" width="50%" align="right">
+
+The game's own Xbox LIVE menus work again against a game server that stands in for Xbox
+Live and THQ's servers. Player Match is the mode that works today. Turn it on in the
+launcher, pick a player name, and choose Xbox LIVE > Player Match in the game. Matches
+connect directly when they can and go through the server's relay when they can't, so
+nobody has to open ports. You see the matches of players on the same release. The server
+keeps your player name, an ID made for your install and your addresses, in memory only.
+It is in [`server/`](server), and anyone can run one and point the launcher at it.
+
+<br clear="right">
+
+### DLC and Title Update 2
+
+The port is built on Title Update 2, the game's last update, because the DLC wrestlers need
+it. Add the DLC packs you bought on the launcher's DLC page; each pack is checked block by
+block before it is installed.
+
+### A launcher that sets everything up
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/launcher-home.jpg" alt="The launcher's home screen"></td>
+    <td width="50%"><img src="docs/images/launcher-welcome.jpg" alt="First-time setup: choose your disc image and Title Update 2"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/launcher-settings.jpg" alt="The launcher's settings"></td>
+    <td><img src="docs/images/launcher-dlc.jpg" alt="The DLC page with Pack 1 (Million Dollar Pack) installed"></td>
+  </tr>
+</table>
+
+The launcher verifies your disc image and update, copies the game files, prepares shaders
+and pipelines, and then stays out of the way. It also repairs a damaged install, opens the
+newest log for a bug report, makes desktop and Start menu shortcuts, picks the GPU, and
+tells you when a new release is out (it only checks, it never downloads).
+
+Also: Alt+Enter switches between window and fullscreen, and F12 saves a screenshot next to
+the session log.
+
+## Play it
+
+You need:
+
+- Windows 10 or 11, 64-bit (tested on Windows 11)
+- A graphics card with Vulkan support and an up-to-date driver
+- About 8 GB of free disk space
+- Your own WWE All Stars disc image (`.iso`), the USA/Europe Xbox 360 release
+- Title Update 2 for it, dumped from your own console
+- Optional: DLC packs you bought, dumped from your own console
+- A controller is recommended
+
+Steps:
+
+1. Download the latest `WWEAllStarsRecomp-<version>-<commit>-win-x64.zip` from
+   [Releases](../../releases/latest).
+2. Extract the whole zip to a normal folder, for example `C:\Games\WWEAllStars`. Don't run it
+   from inside the zip, and avoid `Program Files`.
+3. Open `WWEAllStarsLauncher.exe`. If Windows SmartScreen says "Windows protected your PC",
+   choose **More info**, then **Run anyway**. The launcher isn't code-signed, so this
+   happens once.
+4. Choose your `.iso` (or drop it on the window), then Title Update 2, and optionally DLC.
+   Setup copies and verifies everything and prepares the shaders. It takes a few minutes and
+   happens once. Your files are only read, never changed.
+5. Choose **Play**.
+
+**Where Title Update 2 is:** on your console's drive or USB stick, the file
+`tu00000005_00000000` in `Content\0000000000000000\54510866\000B0000`, or a file whose name
+starts with `TU_` in the console's `Cache` folder. The launcher also takes a folder with it
+inside (a whole USB `Content` folder works) or a zip, 7z or rar.
+
+**Updating:** your saves are in `userdata`. Copy that folder into the new version's folder.
+
+### If something is off
+
+- **Motion isn't quite even:** turn on variable refresh (FreeSync or G-Sync) if your display
+  has it, or use a refresh rate that is a multiple of 60 (60, 120, 240 Hz). On a 144 or
+  165 Hz display without variable refresh, frames alternate between 2 and 3 refreshes.
+- **Slow on a weak GPU:** pick the Low preset under GRAPHICS. Supersampling is the costly
+  setting.
+- **The game started on Emulated:** the launcher says why, and **Prepare shaders** fixes the
+  usual cause.
+- **Crash or wrong graphics:** choose **Open logs** in the launcher, zip the session folder it
+  opens and attach it to a [bug report](../../issues/new/choose). A log can contain folder
+  paths that show your Windows user name; check it before posting.
+
+## FAQ
+
+**Is this an emulator?**
+No. The game's code was translated to x86-64 ahead of time and runs as a Windows program.
+ReXGlue provides what the Xbox 360 would (the kernel, audio, input), and the Native renderer
+replaces the GPU emulation. The Emulated renderer is still there as a fallback.
+
+**Is this piracy? Where do I get the game?**
+No game code or data is in this repository or its releases; the port only runs with a disc
+image, update and DLC you dumped from your own Xbox 360, and the launcher checks them.
+This project won't link to any download, so please don't ask for ISOs in the issues.
+
+**How is it different from Xenia?**
+Xenia emulates the whole console and translates the game's code while it runs. Here the
+code is translated once, ahead of time, and the Native renderer draws the game's Direct3D 9
+calls with Vulkan directly. Xenia's code still matters: ReXGlue's runtime and the Emulated
+renderer come from it.
+
+**Why do I need Title Update 2?**
+On the disc version the game switches DLC loading off. Building on the update makes DLC
+work, and it's the game's final version.
+
+**Does it run on Steam Deck or Linux?**
+It has been played on a Steam Deck, and the game suggests the Low preset there. Linux and
+Proton haven't been tested on a desktop yet.
+
+**Was AI used?**
+Yes, a lot. I'm a software engineer, and most of the code and the docs were written with
+Claude Code, an AI coding agent. I steered the work,
+played and tested every change, and decided what ships. The measurements, investigations
+and decisions are written down in [`docs/`](docs), so anyone can check them.
+
+## Build from source
+
+This is for developers. Players only need the release zip.
+
+You need Visual Studio 2026 Build Tools (Desktop development with C++, which includes
+CMake, Ninja and the Windows SDK), [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows),
+Python 3 and Git. Copy your disc image into the repository folder and Title Update 2's
+`default.xexp` into `assets/` next to `default.xex`, then run these in PowerShell 7:
+
+```powershell
+# Pinned LLVM and ReXGlue, SHA-256 checked
+pwsh ./scripts/bootstrap.ps1
+# ReXGlue sources at the pinned revision, with this project's patches
+pwsh ./scripts/prepare-vulkan.ps1
+
+# Verify the disc and extract its files into assets/
+python scripts/inspect_disc.py "WWE All Stars (USA, Europe).iso" --extract-all assets
+
+# Translate the game's PowerPC code (base executable + Title Update 2) to C++
+pwsh ./scripts/build.ps1 -Action Codegen
+pwsh ./scripts/build.ps1 -Action Configure
+pwsh ./scripts/build.ps1 -Action Build -Jobs 16
+
+# The launcher, and the player zip in out/release/
+pwsh ./scripts/build.ps1 -Action Launcher
+pwsh ./scripts/package.ps1 -Jobs 8
+```
+
+The build accepts only the known executable (SHA-256 `521c2325…6892`) and Title Update 2
+(`a6a45704…ed6a`). `package.ps1` fails if any game-derived file ends up in the zip.
+
+<details>
+<summary>Build variants and PGO</summary>
+
+Flag variants build into their own folder (`out/build/<preset>-<name>-vulkan`) and change
+only the recompiled code and the game; the defaults are what ships.
+
+```powershell
+pwsh ./scripts/build.ps1 -Action Configure -Variant v3o2 -CMakeArgs '-DWWE_GAME_ARCH=x86-64-v3'
+pwsh ./scripts/build.ps1 -Action Configure -Variant thin -CMakeArgs '-DWWE_GAME_LTO=thin'
+pwsh ./scripts/build.ps1 -Action Build -Variant thin -Jobs 10
+pwsh ./scripts/capture.ps1 -Variant thin
+```
+
+PGO, trained on a route you play:
+
+1. `pwsh ./scripts/build.ps1 -Action Configure -Variant pgogen -CMakeArgs '-DWWE_GAME_PGO_GENERATE=ON'`,
+   then `-Action Build -Variant pgogen`.
+2. Play the route on `out/build/win-amd64-relwithdebinfo-pgogen-vulkan/wweallstars.exe` (or
+   `capture.ps1 -Variant pgogen`) and close it with the window's X. Each run adds its counters
+   to `pgo-raw/` in that build folder; a killed game adds nothing.
+3. `python scripts/pgo_profile.py merge out/build/win-amd64-relwithdebinfo-pgogen-vulkan/pgo-raw -o out/pgo/route.profdata`
+4. Configure a variant with `-CMakeArgs '-DWWE_GAME_PGO_USE=<absolute path>/out/pgo/route.profdata'`
+   (optionally with `-DWWE_GAME_LTO=thin`) and build it. A profile goes stale as the code
+   changes, so retrain after codegen changes.
+
+</details>
+
+## How it works
+
+1. `inspect_disc.py` reads the disc image and extracts `default.xex` and the game data.
+   Codegen applies Title Update 2's patch to the executable.
+2. ReXGlue translates the PowerPC code to C++. `wweallstars_manifest.toml` lists the
+   functions its automatic pass misses, each with the evidence for it.
+3. The generated code links against the ReXGlue runtime: the Xbox 360 kernel, audio, input
+   and a Vulkan GPU backend derived from [Xenia](https://github.com/xenia-project/xenia).
+4. The Native renderer in `src/native` hooks the game's statically linked Direct3D 9 and
+   draws with Vulkan, using shaders converted by a patched
+   [XenosRecomp](https://github.com/hedge-dev/XenosRecomp).
+5. `patches/` holds this project's changes to the runtime and the shader converter:
+   frame pacing, live settings, the online client, DLC content, Title Update loading and
+   audio fixes among them. The build applies them.
+
+The design decisions are in [`docs/adr`](docs/adr) and the investigations in
+[`docs/research`](docs/research).
+
+## Credits
+
+- [ReXGlue](https://github.com/rexglue/rexglue-sdk), the recompiler and runtime this port is built on
+- [Xenia](https://github.com/xenia-project/xenia), which ReXGlue's runtime and GPU backend come from
+- [XenosRecomp](https://github.com/hedge-dev/XenosRecomp) by hedge-dev, the shader converter
+- [wwe-svr2011-pc](https://github.com/KaikoClanworth1/wwe-svr2011-pc) by KaikoClanworth1, where the
+  scripted input, the session script and parts of the shader converter and in-game settings
+  patches started
+- [nex-go](https://github.com/PretendoNetwork/nex-go) by Pretendo Network, which the game server uses
+  for the game's online protocol
+- AMD FidelityFX CAS, for sharpening
+- Anton and Barlow Condensed (SIL Open Font License), the launcher's type
+- [SVR2011-Recomp](https://github.com/shaneomac1337/SVR2011-Recomp), this project's sibling
+
+## Legal
+
+This project is not affiliated with or endorsed by WWE, THQ, Yuke's or Microsoft. This
+repository contains no game code or data; the build generates the code from a disc image
+you own. Do not share the `gamedata` or `updatedata` folders, a disc image, the update or
+DLC packs.
+
+The game and the launcher are under the BSD 3-Clause license in [`LICENSE`](LICENSE). The
+game server in [`server/`](server) is under the AGPL-3.0 ([`server/LICENSE`](server/LICENSE)),
+because of nex-go. ReXGlue's license is in [`third_party/`](third_party), and the release
+zip carries the licences of every component in its `licenses` folder.

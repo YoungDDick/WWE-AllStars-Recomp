@@ -1,0 +1,893 @@
+diff --git a/include/rex/graphics/graphics_system.h b/include/rex/graphics/graphics_system.h
+index ac6b056..c598083 100644
+--- a/include/rex/graphics/graphics_system.h
++++ b/include/rex/graphics/graphics_system.h
+@@ -14,6 +14,7 @@
+ #include "rex/system/function_dispatcher.h"
+ 
+ #include <atomic>
++#include <condition_variable>
+ #include <cstdint>
+ #include <functional>
+ #include <memory>
+@@ -121,6 +122,22 @@ class GraphicsSystem : public system::IGraphicsSystem {
+   std::atomic<bool> vsync_worker_running_;
+   system::object_ref<system::XHostThread> vsync_worker_thread_;
+ 
++  // The guest vblank's ideal time (steady_clock ticks) and count, for comparing it with the
++  // host display's real vblank.
++  std::atomic<int64_t> guest_vblank_time_{0};
++  std::atomic<uint64_t> guest_vblank_count_{0};
++  std::atomic<bool> display_vblank_running_{false};
++  std::thread display_vblank_thread_;
++  void DisplayVblankThread();
++
++  // ADR-0016: while display_lock_every_ is N > 0, the display thread signals a guest vblank every
++  // N display refreshes and the GPU VSync thread waits for it instead of the host clock.
++  std::atomic<uint32_t> display_lock_every_{0};
++  std::mutex display_tick_mutex_;
++  std::condition_variable display_tick_cv_;
++  uint64_t display_ticks_ = 0;     // guest vblanks signalled so far
++  int64_t display_tick_time_ = 0;  // steady_clock ticks of the display refresh that made the last
++
+   RegisterFile register_file_;
+   std::unique_ptr<CommandProcessor> command_processor_;
+ 
+diff --git a/include/rex/graphics/vblank_source.h b/include/rex/graphics/vblank_source.h
+new file mode 100644
+index 0000000..5fb6097
+--- /dev/null
++++ b/include/rex/graphics/vblank_source.h
+@@ -0,0 +1,44 @@
++/**
++ * @file        graphics/vblank_source.h
++ * @brief       Whether the guest vblank follows the host display's vblank
++ *
++ * The guest vblank normally runs on the host clock at 60 Hz. On a display whose
++ * real refresh is a little off 60 Hz or a multiple of it (59.94, 119.88), the two
++ * drift, and every few seconds a frame is held or dropped. Driving the guest
++ * vblank from every Nth display refresh removes that; the game then runs at the
++ * display's rate (0.1% slow at 59.94 Hz). With variable refresh the display
++ * already follows the frames, and other rates cannot show 60 Hz evenly, so those
++ * keep the host clock.
++ *
++ * @license     BSD 3-Clause License
++ *              See LICENSE file in the project root for full license text.
++ */
++#pragma once
++
++#include <cmath>
++#include <cstdint>
++
++namespace rex::graphics {
++
++enum class VblankSource { kHostClock, kDisplay };
++
++struct VblankDecision {
++  VblankSource source = VblankSource::kHostClock;
++  uint32_t display_per_guest = 0;  // display refreshes per guest vblank (kDisplay)
++};
++
++// display_hz: the display's measured refresh (0 when unknown). allowed: false in runs that must
++// keep the fixed host clock (scene runs). tolerance: how far display_hz / N may be from guest_hz.
++inline VblankDecision ChooseVblankSource(double display_hz, bool variable_refresh, bool allowed,
++                                         double guest_hz = 60.0, double tolerance = 0.005) {
++  if (!allowed || variable_refresh || display_hz <= 0.0) {
++    return {};
++  }
++  const double every = std::round(display_hz / guest_hz);
++  if (every < 1.0 || std::abs(display_hz / every - guest_hz) > guest_hz * tolerance) {
++    return {};
++  }
++  return {VblankSource::kDisplay, uint32_t(every)};
++}
++
++}  // namespace rex::graphics
+diff --git a/include/rex/system/external_frame.h b/include/rex/system/external_frame.h
+index 98b3097..b2d9f08 100644
+--- a/include/rex/system/external_frame.h
++++ b/include/rex/system/external_frame.h
+@@ -31,4 +31,16 @@ void Publish(const Frame& frame);
+ // The most recently published frame; image_view is 0 before the first one.
+ Frame Latest();
+ 
++// What a guest swap showed compared with the swap before it.
++struct SwapStep {
++  Frame frame;
++  bool repeated = false;  // the same frame as the previous swap
++  uint64_t skipped = 0;   // published frames that no swap showed
++};
++// Latest() for a guest swap, remembering its sequence so that repeats and skips
++// against the previous swap can be reported.
++SwapStep TakeForSwap();
++// The sequence the last swap showed (0 also before the first swap).
++uint64_t LastSwappedSequence();
++
+ }  // namespace rex::system::external_frame
+diff --git a/include/rex/system/swap_choice.h b/include/rex/system/swap_choice.h
+new file mode 100644
+index 0000000..2844a2b
+--- /dev/null
++++ b/include/rex/system/swap_choice.h
+@@ -0,0 +1,56 @@
++/**
++ * @file        system/swap_choice.h
++ * @brief       Which app-published frame a guest swap shows
++ *
++ * The app publishes a frame at the guest's Present, before the swap packet that
++ * belongs to it reaches the command processor. Showing the newest frame at each
++ * swap goes wrong whenever the command processor runs a frame behind: one swap
++ * shows the next frame early (skipping its own) and the following swap has
++ * nothing newer (repeating it), while presents stay evenly spaced. So each swap
++ * shows the frame after the one the previous swap showed.
++ *
++ * @license     BSD 3-Clause License
++ *              See LICENSE file in the project root for full license text.
++ */
++#pragma once
++
++#include <cstdint>
++#include <optional>
++
++namespace rex::system::external_frame {
++
++struct SwapChoice {
++  uint64_t show = 0;      // the sequence to present
++  uint64_t skipped = 0;   // published frames no swap will show
++  bool repeated = false;  // the previous swap's frame again
++};
++
++// last_shown: the sequence the previous swap showed (none before the first swap).
++// latest: the newest published sequence. max_lag: how far behind latest a frame may be and still
++// be intact (the app may be drawing into older ones). available(s): whether frame s was published.
++template <typename Available>
++constexpr SwapChoice ChooseSwapFrame(std::optional<uint64_t> last_shown, uint64_t latest,
++                                     uint64_t max_lag, Available available) {
++  if (!last_shown) {
++    return {latest, 0, false};
++  }
++  if (*last_shown >= latest) {
++    return {*last_shown, 0, true};
++  }
++  uint64_t next = *last_shown + 1;
++  const uint64_t oldest_intact = latest > max_lag ? latest - max_lag : 0;
++  if (next < oldest_intact) {
++    next = oldest_intact;
++  }
++  while (next < latest && !available(next)) {
++    ++next;
++  }
++  return {next, next - *last_shown - 1, false};
++}
++
++constexpr SwapChoice ChooseSwapFrame(std::optional<uint64_t> last_shown, uint64_t latest,
++                                     uint64_t max_lag) {
++  return ChooseSwapFrame(last_shown, latest, max_lag, [](uint64_t) { return true; });
++}
++
++}  // namespace rex::system::external_frame
+diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
+index c4cb340..c1f5efb 100644
+--- a/include/rex/ui/presenter.h
++++ b/include/rex/ui/presenter.h
+@@ -1069,11 +1069,15 @@ class Presenter {
+   uint64_t guest_output_pacing_vblank_count_ = 0;
+   std::chrono::steady_clock::time_point guest_output_pacing_vblank_time_{};
+   std::chrono::steady_clock::duration guest_output_pacing_vblank_period_{};
++  // Consecutive vblank gaps the period filter rejected; a run of them is a real rate change.
++  uint32_t guest_output_pacing_period_rejects_ = 0;
+   bool guest_output_pacing_shutdown_ = false;
+   std::atomic<bool> guest_output_paced_frame_pending_{false};
+   // steady_clock ticks when the pending frame was submitted, for the pacing log.
+   std::atomic<int64_t> guest_output_paced_frame_arrival_{0};
+   std::atomic<uint32_t> guest_output_paced_frames_replaced_{0};
++  // Replaced since the last paced present, for the per-present log.
++  std::atomic<uint32_t> guest_output_paced_frames_replaced_since_present_{0};
+   std::atomic<uint32_t> host_presents_{0};
+   // Window-thread paints by trigger: forced by the window, UI drawers, requested, outdated.
+   std::array<std::atomic<uint32_t>, 4> ui_paints_{};
+diff --git a/src/graphics/CMakeLists.txt b/src/graphics/CMakeLists.txt
+index 0d8f8af..8ab1a50 100644
+--- a/src/graphics/CMakeLists.txt
++++ b/src/graphics/CMakeLists.txt
+@@ -17,6 +17,7 @@ set(REXGPU_XENOS_SOURCES
+ 
+     # GPU system
+     graphics_system.cpp
++    display_vblank.cpp
+     command_processor.cpp
+     util/draw_extent_estimator.cpp
+     util/draw.cpp
+@@ -151,6 +152,11 @@ if(REXGLUE_USE_VULKAN)
+     )
+ endif()
+ 
++if(WIN32)
++    # D3DKMT vblank events (display_vblank.cpp).
++    target_link_libraries(rexgpu-xenos PRIVATE gdi32)
++endif()
++
+ if(REXGLUE_USE_D3D12)
+     target_link_libraries(rexgpu-xenos PRIVATE
+         d3d12
+diff --git a/src/graphics/display_vblank.cpp b/src/graphics/display_vblank.cpp
+new file mode 100644
+index 0000000..c1cba4d
+--- /dev/null
++++ b/src/graphics/display_vblank.cpp
+@@ -0,0 +1,84 @@
++/**
++ * @file        graphics/display_vblank.cpp
++ * @brief       The host display's real vblank
++ *
++ * @license     BSD 3-Clause License
++ *              See LICENSE file in the project root for full license text.
++ */
++#include "display_vblank.h"
++
++#include <rex/platform.h>
++
++#if REX_PLATFORM_WIN32
++#include <windows.h>
++// d3dkmthk.h needs NTSTATUS from winternl.h and the D3DKMT types from the Windows SDK.
++#include <winternl.h>
++#include <d3dkmthk.h>
++#endif
++
++namespace rex::graphics {
++
++#if REX_PLATFORM_WIN32
++
++DisplayVblank::~DisplayVblank() {
++  if (adapter_) {
++    D3DKMT_CLOSEADAPTER close = {};
++    close.hAdapter = adapter_;
++    D3DKMTCloseAdapter(&close);
++  }
++}
++
++bool DisplayVblank::Open() {
++  MONITORINFOEXW monitor = {};
++  monitor.cbSize = sizeof(monitor);
++  HMONITOR handle = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
++  if (!GetMonitorInfoW(handle, &monitor)) {
++    return false;
++  }
++  HDC dc = CreateDCW(monitor.szDevice, nullptr, nullptr, nullptr);
++  if (!dc) {
++    return false;
++  }
++  D3DKMT_OPENADAPTERFROMHDC open = {};
++  open.hDc = dc;
++  NTSTATUS status = D3DKMTOpenAdapterFromHdc(&open);
++  DeleteDC(dc);
++  if (status != 0) {
++    return false;
++  }
++  adapter_ = open.hAdapter;
++  source_id_ = open.VidPnSourceId;
++  char name[64] = {};
++  WideCharToMultiByte(CP_UTF8, 0, monitor.szDevice, -1, name, sizeof(name) - 1, nullptr, nullptr);
++  name_ = name;
++  DEVMODEW mode = {};
++  mode.dmSize = sizeof(mode);
++  if (EnumDisplaySettingsW(monitor.szDevice, ENUM_CURRENT_SETTINGS, &mode) &&
++      mode.dmDisplayFrequency > 1) {
++    mode_hz_ = double(mode.dmDisplayFrequency);
++  }
++  return true;
++}
++
++std::optional<DisplayVblank::Clock::time_point> DisplayVblank::Wait() {
++  if (!adapter_) {
++    return std::nullopt;
++  }
++  D3DKMT_WAITFORVERTICALBLANKEVENT wait = {};
++  wait.hAdapter = adapter_;
++  wait.VidPnSourceId = source_id_;
++  if (D3DKMTWaitForVerticalBlankEvent(&wait) != 0) {
++    return std::nullopt;
++  }
++  return Clock::now();
++}
++
++#else
++
++DisplayVblank::~DisplayVblank() = default;
++bool DisplayVblank::Open() { return false; }
++std::optional<DisplayVblank::Clock::time_point> DisplayVblank::Wait() { return std::nullopt; }
++
++#endif
++
++}  // namespace rex::graphics
+diff --git a/src/graphics/display_vblank.h b/src/graphics/display_vblank.h
+new file mode 100644
+index 0000000..2ad1edd
+--- /dev/null
++++ b/src/graphics/display_vblank.h
+@@ -0,0 +1,46 @@
++/**
++ * @file        graphics/display_vblank.h
++ * @brief       The host display's real vblank
++ *
++ * The guest vblank runs on the host clock and does not follow the monitor. This
++ * waits on the monitor's own vblank (Windows: the display driver's vblank event
++ * for the primary display), so the two can be compared or locked together.
++ *
++ * @license     BSD 3-Clause License
++ *              See LICENSE file in the project root for full license text.
++ */
++#pragma once
++
++#include <chrono>
++#include <cstdint>
++#include <optional>
++#include <string>
++
++namespace rex::graphics {
++
++class DisplayVblank {
++ public:
++  using Clock = std::chrono::steady_clock;
++
++  DisplayVblank() = default;
++  DisplayVblank(const DisplayVblank&) = delete;
++  DisplayVblank& operator=(const DisplayVblank&) = delete;
++  ~DisplayVblank();
++
++  // Opens the primary display; false when the platform or driver offers no vblank event.
++  bool Open();
++  // Blocks until the display's next vblank and returns when it happened, or nothing on failure.
++  std::optional<Clock::time_point> Wait();
++  const std::string& name() const { return name_; }
++  // The refresh rate of the display's current mode (0 if unknown). Under variable refresh the
++  // measured rate follows the frames instead.
++  double mode_hz() const { return mode_hz_; }
++
++ private:
++  double mode_hz_ = 0.0;
++  uint32_t adapter_ = 0;
++  uint32_t source_id_ = 0;
++  std::string name_;
++};
++
++}  // namespace rex::graphics
+diff --git a/src/graphics/graphics_system.cpp b/src/graphics/graphics_system.cpp
+index 85a5e40..753e93a 100644
+--- a/src/graphics/graphics_system.cpp
++++ b/src/graphics/graphics_system.cpp
+@@ -12,6 +12,7 @@
+ #include <rex/graphics/graphics_system.h>
+ 
+ #include <algorithm>
++#include <cmath>
+ #include <cctype>
+ #include <chrono>
+ #include <cstdint>
+@@ -19,6 +20,7 @@
+ #include <memory>
+ #include <mutex>
+ #include <utility>
++#include <vector>
+ 
+ #include <rex/cvar.h>
+ #include <rex/graphics/command_processor.h>
+@@ -28,10 +30,22 @@
+ #include <rex/stream.h>
+ #include <rex/system/kernel_state.h>
+ #include <rex/system/xthread.h>
++#include <rex/thread.h>
+ #include <rex/ui/graphics_provider.h>
+ #include <rex/ui/window.h>
+ #include <rex/ui/windowed_app_context.h>
+ 
++#include "display_vblank.h"
++#include <rex/graphics/vblank_source.h>
++
++REXCVAR_DEFINE_BOOL(vblank_follows_display, true, "GPU",
++                    "Drive the guest vblank from the display's own refresh when it is (nearly) a "
++                    "multiple of 60 Hz and not variable, so no frame is held or dropped as the "
++                    "two drift; off keeps the fixed 60 Hz host clock (scene runs)")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_BOOL(display_vblank_log, false, "GPU",
++                    "Log the host display's measured refresh and the guest vblank's phase "
++                    "against it once a second");
+ REXCVAR_DEFINE_STRING(swap_post_effect, "none", "GPU", "Swap post effect: none, fxaa, fxaa_extreme")
+     .allowed({"none", "fxaa", "fxaa_extreme"})
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+@@ -159,7 +173,36 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
+             std::max(uint64_t(1), uint64_t(double(guest_tick_frequency) / refresh_rate_hz));
+         uint64_t no_vsync_interval_ticks = std::max(uint64_t(1), guest_tick_frequency / 1000);
+         uint64_t last_frame_time = chrono::Clock::QueryGuestTickCount();
++        uint64_t display_ticks_seen = 0;
++        auto publish_vblank = [this](std::chrono::steady_clock::time_point ideal) {
++          guest_vblank_time_.store(ideal.time_since_epoch().count(), std::memory_order_relaxed);
++          guest_vblank_count_.fetch_add(1, std::memory_order_release);
++          if (presenter_) {
++            presenter_->OnGuestVblank(ideal);
++          }
++        };
+         while (vsync_worker_running_) {
++          if (display_lock_every_.load(std::memory_order_acquire) && REXCVAR_GET(vsync)) {
++            // The display drives the guest vblank. Wait for its signal; if it stops (the
++            // display thread lost its event or unlocked), fall through to the host clock.
++            std::unique_lock lock(display_tick_mutex_);
++            display_tick_cv_.wait_for(lock, std::chrono::milliseconds(50), [&]() {
++              return display_ticks_ != display_ticks_seen || !vsync_worker_running_ ||
++                     !display_lock_every_.load(std::memory_order_acquire);
++            });
++            if (display_ticks_ != display_ticks_seen) {
++              display_ticks_seen = display_ticks_;
++              const auto ideal = std::chrono::steady_clock::time_point(
++                  std::chrono::steady_clock::duration(display_tick_time_));
++              lock.unlock();
++              publish_vblank(ideal);
++              MarkVblank();
++              last_frame_time = chrono::Clock::QueryGuestTickCount();
++              continue;
++            }
++            lock.unlock();
++            last_frame_time = chrono::Clock::QueryGuestTickCount() - vsync_interval_ticks;
++          }
+           uint64_t interval_ticks =
+               REXCVAR_GET(vsync) ? vsync_interval_ticks : no_vsync_interval_ticks;
+           uint64_t deadline = last_frame_time + interval_ticks;
+@@ -170,13 +213,12 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
+           if (remaining_us > 0) {
+             rex::thread::PreciseSleep(std::chrono::microseconds(remaining_us));
+           }
+-          if (presenter_) {
++          {
+             // Report when the tick was due, not when this thread woke up.
+             int64_t late_ticks = int64_t(chrono::Clock::QueryGuestTickCount() - deadline);
+-            presenter_->OnGuestVblank(
+-                std::chrono::steady_clock::now() -
+-                std::chrono::nanoseconds(std::max<int64_t>(late_ticks, 0) * 1000000000 /
+-                                         int64_t(guest_tick_frequency)));
++            publish_vblank(std::chrono::steady_clock::now() -
++                           std::chrono::nanoseconds(std::max<int64_t>(late_ticks, 0) * 1000000000 /
++                                                    int64_t(guest_tick_frequency)));
+           }
+           uint64_t current_time = chrono::Clock::QueryGuestTickCount();
+           while (current_time - last_frame_time >= interval_ticks) {
+@@ -191,6 +233,11 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
+   vsync_worker_thread_->set_name("GPU VSync");
+   vsync_worker_thread_->Create();
+ 
++  if (REXCVAR_GET(display_vblank_log) || REXCVAR_GET(vblank_follows_display)) {
++    display_vblank_running_ = true;
++    display_vblank_thread_ = std::thread([this]() { DisplayVblankThread(); });
++  }
++
+   return X_STATUS_SUCCESS;
+ }
+ 
+@@ -200,6 +247,13 @@ void GraphicsSystem::Shutdown() {
+     command_processor_.reset();
+   }
+ 
++  if (display_vblank_thread_.joinable()) {
++    // The thread wakes on the next display vblank and sees the flag.
++    display_vblank_running_ = false;
++    display_vblank_thread_.join();
++  }
++  display_lock_every_.store(0, std::memory_order_release);
++  display_tick_cv_.notify_all();
+   if (vsync_worker_thread_) {
+     vsync_worker_running_ = false;
+     vsync_worker_thread_->Wait(0, 0, 0, nullptr);
+@@ -222,6 +276,155 @@ void GraphicsSystem::Shutdown() {
+   provider_.reset();
+ }
+ 
++void GraphicsSystem::DisplayVblankThread() {
++  rex::thread::set_current_thread_name("Display VBlank");
++  using Clock = DisplayVblank::Clock;
++  const bool log = REXCVAR_GET(display_vblank_log);
++  const bool follow = REXCVAR_GET(vblank_follows_display);
++  DisplayVblank display;
++  if (!display.Open()) {
++    REXGPU_WARN("Display vblank: no vblank event for the primary display; the guest vblank "
++                "stays on the host clock");
++    return;
++  }
++  REXGPU_INFO("Display vblank thread started on {} (mode {} Hz)", display.name(), display.mode_hz());
++  // Variable refresh, once seen, stays assumed: with vsync the panel then refreshes exactly at the
++  // frame rate, which looks like a fixed 60 Hz display, and locking to it would feed back.
++  bool variable_refresh_seen = false;
++  // Lock only after this many one-second windows in a row allow it, so a short calm stretch
++  // under variable refresh does not lock.
++  constexpr int kWindowsToLock = 3;
++  int windows_allowing = 0;
++  double period_estimate_ms = 0.0;
++  uint64_t refreshes = 0;
++  auto stop_following = [this](const char* reason) {
++    if (display_lock_every_.exchange(0, std::memory_order_acq_rel)) {
++      REXGPU_INFO("Guest vblank back on the host clock: {}", reason);
++      display_tick_cv_.notify_all();
++    }
++  };
++  Clock::time_point window_start{}, last{};
++  // Gaps between the vblank events this thread saw; it can miss one, so a gap may span several
++  // refreshes.
++  std::vector<double> gaps_ms;
++  uint64_t guest_count_start = 0;
++  int64_t guest_time_start = 0;
++  double last_phase_ms = -1.0;
++  while (display_vblank_running_) {
++    std::optional<Clock::time_point> vblank = display.Wait();
++    if (!vblank) {
++      REXGPU_WARN("Display vblank: waiting for the vblank failed; stopping");
++      stop_following("the display's vblank event failed");
++      return;
++    }
++    if (last != Clock::time_point{} && period_estimate_ms > 0.0) {
++      // Count refreshes, not events: this thread can miss one.
++      const double gap_ms = std::chrono::duration<double, std::milli>(*vblank - last).count();
++      const uint64_t passed = std::max<uint64_t>(1, uint64_t(gap_ms / period_estimate_ms + 0.5));
++      const uint32_t every = display_lock_every_.load(std::memory_order_acquire);
++      if (every && (refreshes + passed) / every != refreshes / every) {
++        {
++          std::lock_guard lock(display_tick_mutex_);
++          ++display_ticks_;
++          display_tick_time_ = vblank->time_since_epoch().count();
++        }
++        display_tick_cv_.notify_one();
++      }
++      refreshes += passed;
++    }
++    if (window_start == Clock::time_point{}) {
++      window_start = *vblank;
++      guest_count_start = guest_vblank_count_.load(std::memory_order_acquire);
++      guest_time_start = guest_vblank_time_.load(std::memory_order_relaxed);
++      gaps_ms.clear();
++      last = *vblank;
++      continue;
++    }
++    gaps_ms.push_back(std::chrono::duration<double, std::milli>(*vblank - last).count());
++    last = *vblank;
++    if (last - window_start < std::chrono::seconds(1)) {
++      continue;
++    }
++    // Rates over the window from first to last event; the phase is where the latest guest
++    // vblank falls inside the display's refresh period.
++    std::vector<double> sorted = gaps_ms;
++    std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
++    const double median_gap_ms = sorted[sorted.size() / 2];
++    // A gap well short of two refreshes is one refresh the display held longer, which only
++    // variable refresh (FreeSync, G-Sync) does; a gap of about N refreshes means this thread missed
++    // N - 1 events.
++    uint64_t stretched = 0, missed = 0;
++    for (double gap : gaps_ms) {
++      double ratio = gap / median_gap_ms;
++      if (ratio >= 1.8) {
++        missed += uint64_t(ratio + 0.5) - 1;
++      } else if (ratio >= 1.2) {
++        ++stretched;
++      }
++    }
++    const double display_period_ms = median_gap_ms;
++    uint64_t guest_count = guest_vblank_count_.load(std::memory_order_acquire);
++    int64_t guest_time = guest_vblank_time_.load(std::memory_order_relaxed);
++    double guest_hz = 0.0;
++    if (guest_count > guest_count_start && guest_time > guest_time_start) {
++      guest_hz = double(guest_count - guest_count_start) /
++                 std::chrono::duration<double>(Clock::duration(guest_time - guest_time_start)).count();
++    }
++    double offset_ms = std::chrono::duration<double, std::milli>(
++                           Clock::time_point(Clock::duration(guest_time)) - last)
++                           .count();
++    double phase_ms = std::fmod(offset_ms, display_period_ms);
++    if (phase_ms < 0) {
++      phase_ms += display_period_ms;
++    }
++    double drift_ms = 0.0;
++    if (last_phase_ms >= 0) {
++      drift_ms = phase_ms - last_phase_ms;
++      if (drift_ms > display_period_ms / 2) drift_ms -= display_period_ms;
++      if (drift_ms < -display_period_ms / 2) drift_ms += display_period_ms;
++    }
++    last_phase_ms = phase_ms;
++    period_estimate_ms = display_period_ms;
++    // Two held refreshes in a second is variable refresh at work, not noise; so is a measured
++    // rate away from the display mode's rate (the panel follows the frames).
++    const double measured_hz = 1000.0 / display_period_ms;
++    const bool off_mode = display.mode_hz() > 0.0 &&
++                          std::abs(measured_hz - display.mode_hz()) > display.mode_hz() * 0.02;
++    if ((stretched >= 2 || off_mode) && !variable_refresh_seen) {
++      variable_refresh_seen = true;
++      REXGPU_INFO("Display vblank: variable refresh is active ({:.3f} Hz measured, mode {} Hz, {} "
++                  "refreshes held longer); the guest vblank stays on the host clock",
++                  measured_hz, display.mode_hz(), stretched);
++    }
++    const VblankDecision decision =
++        ChooseVblankSource(measured_hz, variable_refresh_seen, follow);
++    if (decision.source == VblankSource::kDisplay) {
++      if (++windows_allowing >= kWindowsToLock &&
++          display_lock_every_.load(std::memory_order_acquire) != decision.display_per_guest) {
++        display_lock_every_.store(decision.display_per_guest, std::memory_order_release);
++        REXGPU_INFO("Guest vblank now follows the display: every {} refreshes of {:.3f} Hz",
++                    decision.display_per_guest, 1000.0 / display_period_ms);
++      }
++    } else {
++      windows_allowing = 0;
++      stop_following(variable_refresh_seen ? "variable refresh is active"
++                                     : "the display's refresh is not a multiple of 60 Hz");
++    }
++    if (log) {
++      REXGPU_INFO(
++          "Display vblank 1s: display {:.3f} Hz, {} refreshes held longer (variable refresh), "
++          "{} events missed; guest {:.3f} Hz, guest phase {:.3f} ms of {:.3f} ms, drift {:+.3f} "
++          "ms/s; guest vblank from {}",
++          1000.0 / display_period_ms, stretched, missed, guest_hz, phase_ms, display_period_ms,
++          drift_ms, display_lock_every_.load(std::memory_order_acquire) ? "the display" : "the host clock");
++    }
++    window_start = last;
++    gaps_ms.clear();
++    guest_count_start = guest_count;
++    guest_time_start = guest_time;
++  }
++}
++
+ void GraphicsSystem::OnHostGpuLossFromAnyThread([[maybe_unused]] bool is_responsible) {
+   // TODO(Triang3l): Somehow gain exclusive ownership of the Provider (may be
+   // used by the command processor, the presenter, and possibly anything else,
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 7ff60e9..774f1ac 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -2346,9 +2346,20 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+   xenos::TextureFormat frontbuffer_format;
+   bool swap_source_needs_rb_swap = false;
+   VkImageView swap_texture_view = VK_NULL_HANDLE;
+-  const system::external_frame::Frame external_frame =
+-      system::external_frame::IsEnabled() ? system::external_frame::Latest()
+-                                          : system::external_frame::Frame{};
++  const system::external_frame::SwapStep external_step =
++      system::external_frame::IsEnabled() ? system::external_frame::TakeForSwap()
++                                          : system::external_frame::SwapStep{};
++  const system::external_frame::Frame& external_frame = external_step.frame;
++  if (REXCVAR_GET(frame_event_log) && (external_step.repeated || external_step.skipped)) {
++    // A swap that shows the previous frame again, or jumps over published ones, judders on
++    // screen while the presents stay evenly spaced.
++    if (external_step.repeated) {
++      REXGPU_INFO("Frame event: external frame repeated, sequence {}", external_frame.sequence);
++    } else {
++      REXGPU_INFO("Frame event: external frame skipped {}, sequence {}", external_step.skipped,
++                  external_frame.sequence);
++    }
++  }
+   if (external_frame.image_view) {
+     // Present the native renderer's frame (RGBA8, already at output scale)
+     // through the usual gamma and post-effect path.
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_io.cpp b/src/kernel/xboxkrnl/xboxkrnl_io.cpp
+index 3f1a852..09f6048 100644
+--- a/src/kernel/xboxkrnl/xboxkrnl_io.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_io.cpp
+@@ -12,6 +12,7 @@
+ // Disable warnings about unused parameters for kernel functions
+ #pragma GCC diagnostic ignored "-Wunused-parameter"
+ 
++#include <rex/cvar.h>
+ #include <rex/filesystem/device.h>
+ #include <rex/kernel/xboxkrnl/private.h>
+ #include <rex/logging.h>
+@@ -29,6 +30,9 @@
+ #include <rex/system/xtypes.h>
+ #include <rex/thread/mutex.h>
+ 
++REXCVAR_DEFINE_STRING(log_file_opens, "", "Kernel",
++                      "Log every guest file open whose path contains this text (e.g. .bik)");
++
+ namespace rex::kernel::xboxkrnl {
+ using namespace rex::system;
+ 
+@@ -128,6 +132,11 @@ u32 NtCreateFile_entry(mapped_u32 handle_out, u32 desired_access,
+       target_path, (uint32_t)desired_access, (uint32_t)file_attributes, (uint32_t)share_access,
+       (uint32_t)creation_disposition, (uint32_t)create_options);
+ 
++  if (const std::string& filter = REXCVAR_GET(log_file_opens);
++      !filter.empty() && target_path.find(filter) != std::string::npos) {
++    REXKRNL_INFO("File open: {}", target_path);
++  }
++
+   // Enforce that the path is ASCII.
+   if (!IsValidPath(target_path, false)) {
+     return X_STATUS_OBJECT_NAME_INVALID;
+diff --git a/src/system/external_frame.cpp b/src/system/external_frame.cpp
+index 7557a72..107233c 100644
+--- a/src/system/external_frame.cpp
++++ b/src/system/external_frame.cpp
+@@ -7,15 +7,33 @@
+  */
+ #include <rex/system/external_frame.h>
+ 
++#include <array>
+ #include <atomic>
+ #include <mutex>
++#include <optional>
++
++#include <rex/cvar.h>
++#include <rex/system/swap_choice.h>
++
++REXCVAR_DEFINE_BOOL(external_frame_in_order, true, "GPU",
++                    "Each guest swap shows the app-rendered frame that belongs to it, not the "
++                    "newest one (the newest skips and repeats frames when the GPU runs behind)");
+ 
+ namespace rex::system::external_frame {
+ 
+ namespace {
++// The app draws into a frame's image again three frames later, so the newest published frame
++// and the one before it are intact.
++constexpr uint64_t kMaxSwapLag = 1;
++
+ std::atomic<bool> g_enabled{false};
+ std::mutex g_mutex;
+ Frame g_latest;
++// The last few published frames by sequence (slot = sequence % size).
++std::array<Frame, 4> g_recent;
++std::optional<uint64_t> g_last_shown;
++// Sequence + 1 of the frame the last swap showed; 0 before the first swap.
++std::atomic<uint64_t> g_last_swapped{0};
+ }  // namespace
+ 
+ void SetEnabled(bool enabled) { g_enabled.store(enabled, std::memory_order_release); }
+@@ -25,6 +43,7 @@ bool IsEnabled() { return g_enabled.load(std::memory_order_acquire); }
+ void Publish(const Frame& frame) {
+   std::lock_guard lock(g_mutex);
+   g_latest = frame;
++  g_recent[frame.sequence % g_recent.size()] = frame;
+ }
+ 
+ Frame Latest() {
+@@ -32,4 +51,38 @@ Frame Latest() {
+   return g_latest;
+ }
+ 
++SwapStep TakeForSwap() {
++  SwapStep step;
++  std::lock_guard lock(g_mutex);
++  if (!g_latest.image_view) {
++    return step;
++  }
++  auto available = [](uint64_t sequence) {
++    const Frame& f = g_recent[sequence % g_recent.size()];
++    return f.image_view && f.sequence == sequence;
++  };
++  SwapChoice choice;
++  if (REXCVAR_GET(external_frame_in_order)) {
++    choice = ChooseSwapFrame(g_last_shown, g_latest.sequence, kMaxSwapLag, available);
++  } else {
++    // The newest frame at every swap.
++    choice.show = g_latest.sequence;
++    if (g_last_shown) {
++      choice.repeated = choice.show == *g_last_shown;
++      choice.skipped = choice.show > *g_last_shown + 1 ? choice.show - *g_last_shown - 1 : 0;
++    }
++  }
++  step.frame = available(choice.show) ? g_recent[choice.show % g_recent.size()] : g_latest;
++  step.repeated = choice.repeated;
++  step.skipped = choice.skipped;
++  g_last_shown = step.frame.sequence;
++  g_last_swapped.store(step.frame.sequence + 1, std::memory_order_release);
++  return step;
++}
++
++uint64_t LastSwappedSequence() {
++  const uint64_t last = g_last_swapped.load(std::memory_order_acquire);
++  return last ? last - 1 : 0;
++}
++
+ }  // namespace rex::system::external_frame
+diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
+index 4043378..d4ed510 100644
+--- a/src/ui/presenter.cpp
++++ b/src/ui/presenter.cpp
+@@ -21,6 +21,7 @@
+ #include <rex/cvar.h>
+ #include <rex/logging.h>
+ #include <rex/platform.h>
++#include <rex/system/external_frame.h>
+ #include <rex/thread.h>
+ #include <rex/ui/presenter.h>
+ #include <rex/ui/window.h>
+@@ -654,6 +655,7 @@ bool Presenter::RefreshGuestOutput(
+         std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_relaxed);
+     if (guest_output_paced_frame_pending_.exchange(true, std::memory_order_acq_rel)) {
+       guest_output_paced_frames_replaced_.fetch_add(1, std::memory_order_relaxed);
++      guest_output_paced_frames_replaced_since_present_.fetch_add(1, std::memory_order_relaxed);
+     }
+     return is_active;
+   }
+@@ -670,9 +672,13 @@ void Presenter::OnGuestVblank(std::chrono::steady_clock::time_point vblank_time)
+     if (guest_output_pacing_vblank_count_++) {
+       auto period = vblank_time - guest_output_pacing_vblank_time_;
+       auto& current = guest_output_pacing_vblank_period_;
+-      // Ignore gaps from missed ticks; a real rate change moves by less than half a period.
+-      if (current <= decltype(period)::zero() || (period > current / 2 && period < current * 3 / 2)) {
++      // Ignore single gaps from missed ticks; a real rate change moves by less than half a
++      // period, or keeps disagreeing (a wrong estimate must not stick).
++      constexpr uint32_t kRejectsToAdopt = 8;
++      if (current <= decltype(period)::zero() || (period > current / 2 && period < current * 3 / 2) ||
++          ++guest_output_pacing_period_rejects_ >= kRejectsToAdopt) {
+         current = period;
++        guest_output_pacing_period_rejects_ = 0;
+       }
+     }
+     guest_output_pacing_vblank_time_ = vblank_time;
+@@ -708,8 +714,10 @@ void Presenter::GuestOutputPacingThread() {
+   if (!REXCVAR_GET(present_pacing_log).empty()) {
+     log = std::fopen(REXCVAR_GET(present_pacing_log).c_str(), "w");
+     if (log) {
+-      std::fputs("present_us,interval_us,repeated_vblanks,arrival_after_vblank_us,latency_us\n",
+-                 log);
++      std::fputs(
++          "present_us,interval_us,repeated_vblanks,arrival_after_vblank_us,latency_us,"
++          "guest_vblank,frames_replaced,external_sequence\n",
++          log);
+     }
+   }
+   const Clock::time_point log_origin = Clock::now();
+@@ -722,6 +730,7 @@ void Presenter::GuestOutputPacingThread() {
+   while (true) {
+     Clock::time_point vblank_time;
+     Clock::duration period;
++    uint64_t vblank_count;
+     {
+       std::unique_lock<std::mutex> lock(guest_output_pacing_mutex_);
+       guest_output_pacing_condition_.wait(lock, [&]() {
+@@ -735,6 +744,7 @@ void Presenter::GuestOutputPacingThread() {
+       }
+       vblank_time = guest_output_pacing_vblank_time_;
+       period = guest_output_pacing_vblank_period_;
++      vblank_count = guest_output_pacing_vblank_count_;
+     }
+     if (period <= Clock::duration::zero()) {
+       continue;
+@@ -777,9 +787,15 @@ void Presenter::GuestOutputPacingThread() {
+       Clock::time_point arrival{Clock::duration(
+           guest_output_paced_frame_arrival_.load(std::memory_order_relaxed))};
+       // Negative when the frame missed its own vblank's present moment and waited a tick.
+-      std::fprintf(log, "%lld,%lld,%u,%lld,%lld\n", us(presented - log_origin),
++      // external_sequence is the native renderer's frame the last guest swap showed (0 without
++      // one); frames_replaced counts guest frames dropped before display since the last present.
++      std::fprintf(log, "%lld,%lld,%u,%lld,%lld,%llu,%u,%llu\n", us(presented - log_origin),
+                    last_logged_present == Clock::time_point{} ? 0LL : us(presented - last_logged_present),
+-                   repeated_since_present, us(arrival - (target - offset)), us(presented - arrival));
++                   repeated_since_present, us(arrival - (target - offset)), us(presented - arrival),
++                   static_cast<unsigned long long>(vblank_count),
++                   guest_output_paced_frames_replaced_since_present_.exchange(
++                       0, std::memory_order_relaxed),
++                   static_cast<unsigned long long>(system::external_frame::LastSwappedSequence()));
+       last_logged_present = presented;
+     }
+     repeated_since_present = 0;
+diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
+index 23645ef..6f5500f 100644
+--- a/src/ui/vulkan/vulkan_presenter.cpp
++++ b/src/ui/vulkan/vulkan_presenter.cpp
+@@ -49,6 +49,11 @@
+ REXCVAR_DEFINE_BOOL(present_render_pass_clear, true, "UI/Presenter",
+                     "Clear render pass during presentation");
+ 
++REXCVAR_DEFINE_BOOL(present_vsync, true, "UI/Presenter",
++                    "Vsync: show each frame on a display refresh (FIFO), so it never tears; off "
++                    "presents immediately for the lowest latency")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
+ REXCVAR_DEFINE_BOOL(vulkan_allow_present_mode_immediate, true, "UI/Vulkan",
+                     "Allow immediate present mode (no vsync)");
+ 
+@@ -1381,7 +1386,11 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
+   // interfering with GPU command processing, and also to allow tearing so
+   // variable refresh rate may be used where it's available.
+   // Note: If the priorities here are changes, update the cvar descriptions.
+-  if (REXCVAR_GET(vulkan_allow_present_mode_immediate) &&
++  if (REXCVAR_GET(present_vsync)) {
++    // One image per refresh, never torn. With variable refresh (FreeSync, G-Sync) the display
++    // still shows each frame when it arrives; FIFO is always available.
++    swapchain_create_info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
++  } else if (REXCVAR_GET(vulkan_allow_present_mode_immediate) &&
+       std::find(present_modes.cbegin(), present_modes.cend(), VK_PRESENT_MODE_IMMEDIATE_KHR) !=
+           present_modes.cend()) {
+     // Allowing tearing to reduce latency, and possibly variable refresh rate

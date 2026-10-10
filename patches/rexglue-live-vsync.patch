@@ -1,0 +1,15 @@
+diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
+index 898322f..a5b9d6b 100644
+--- a/src/ui/vulkan/vulkan_presenter.cpp
++++ b/src/ui/vulkan/vulkan_presenter.cpp
+@@ -54,7 +54,9 @@ REXCVAR_DECLARE(bool, present_wait);  // presenter.cpp
+ REXCVAR_DEFINE_BOOL(present_vsync, true, "UI/Presenter",
+                     "Vsync: show each frame on a display refresh (FIFO), so it never tears; off "
+                     "presents immediately for the lowest latency")
+-    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++    // Read when the swapchain is created; a change rebuilds it through
++    // Presenter::OnSurfaceResizeFromUIThread (WWE: live VSync).
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
+ REXCVAR_DEFINE_BOOL(vulkan_allow_present_mode_immediate, true, "UI/Vulkan",
+                     "Allow immediate present mode (no vsync)");

@@ -1,0 +1,55 @@
+# Input script: 1v1 Exhibition from boot to the result screen (ticket 01).
+# Hogan (P1, idle) vs Cena (CPU) in Arena_001 SmackDown; the CPU wins.
+# Feed it to the scripted pad: pwsh scripts/session.ps1 input (Get-Content scripts/input/exhibition-1v1.txt)
+# Timing is wall-clock ms from the game's first pad poll. Keep comments on
+# their own lines (a trailing one is logged as a bad duration).
+#
+# Title: START is ignored while the logo animates in, so wait for it to settle.
+wait 40000
+press START
+wait 5000
+# AUTOSAVE notice
+press A
+wait 6000
+# Main menu: UnlockAll (Left Y Down Left Y X Left X Y Down Right X Left Up X Right)
+press LEFT
+press Y
+press DOWN
+press LEFT
+press Y
+press X
+press LEFT
+press X
+press Y
+press DOWN
+press RIGHT
+press X
+press LEFT
+press UP
+press X
+press RIGHT
+wait 2000
+# "YOU HAVE UNLOCKED: Everything!" popup, then Up back to EXHIBITION
+press A
+wait 1500
+press UP
+wait 1000
+# EXHIBITION, STANDARD, 1 vs. 1
+press A
+wait 2500
+press A
+wait 2500
+press A
+wait 3000
+# Controller select: pad 1 to the blue socket, accept (no confirmation popup)
+press LEFT
+wait 1500
+press A
+wait 4000
+# Select screen: P1 Hogan, then the same pad picks P2 Cena; arena select follows
+press A
+wait 1500
+press A
+wait 4000
+# Arena: cursor starts on SMACKDOWN
+press A

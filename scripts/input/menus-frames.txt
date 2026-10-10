@@ -1,0 +1,40 @@
+# Input script: boot to the 1 vs. 1 menu on absolute frames (ticket 12 demo).
+# Same route as exhibition-1v1.txt up to the match-style menu, anchored with
+# `at` so repeated runs press each button on the same guest frame (±1).
+# Run with --wwe_native_dump_frame=5400 to dump the 1 vs. 1 menu, or with
+# --wwe_native_dump_frames=2700,3200,4300 --wwe_native_dump_dir=<absolute dir> for
+# title, AUTOSAVE notice and main menu in one run (Emulated: add --wwe_native_renderer=false --readback_resolve=full).
+#
+# Title shows by frame ~2340; START is ignored while the logo animates in.
+at 2900
+press START 6f
+# AUTOSAVE notice
+at 3200
+press A 6f
+# Main menu: UnlockAll, then the popup, then Up back to EXHIBITION
+at 3700
+press LEFT 6f
+press Y 6f
+press DOWN 6f
+press LEFT 6f
+press Y 6f
+press X 6f
+press LEFT 6f
+press X 6f
+press Y 6f
+press DOWN 6f
+press RIGHT 6f
+press X 6f
+press LEFT 6f
+press UP 6f
+press X 6f
+press RIGHT 6f
+at 4400
+press A 6f
+at 4600
+press UP 6f
+# EXHIBITION, then STANDARD; the 1 vs. 1 menu stays up
+at 4800
+press A 6f
+at 5100
+press A 6f

@@ -1,0 +1,58 @@
+diff --git a/src/graphics/graphics_system.cpp b/src/graphics/graphics_system.cpp
+index 0791710..3874fa4 100644
+--- a/src/graphics/graphics_system.cpp
++++ b/src/graphics/graphics_system.cpp
+@@ -42,7 +42,9 @@ REXCVAR_DEFINE_BOOL(vblank_follows_display, true, "GPU",
+                     "Drive the guest vblank from the display's own refresh when it is (nearly) a "
+                     "multiple of 60 Hz and not variable, so no frame is held or dropped as the "
+                     "two drift; off keeps the fixed 60 Hz host clock (scene runs)")
+-    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++    // The display vblank thread always runs and reads it once a second (WWE: live
++    // Lock to display).
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ REXCVAR_DEFINE_BOOL(display_vblank_log, false, "GPU",
+                     "Log the host display's measured refresh and the guest vblank's phase "
+                     "against it once a second");
+@@ -235,10 +237,9 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
+   vsync_worker_thread_->set_name("GPU VSync");
+   vsync_worker_thread_->Create();
+ 
+-  if (REXCVAR_GET(display_vblank_log) || REXCVAR_GET(vblank_follows_display)) {
+-    display_vblank_running_ = true;
+-    display_vblank_thread_ = std::thread([this]() { DisplayVblankThread(); });
+-  }
++  // Always started, so Lock to display can be turned on during the session.
++  display_vblank_running_ = true;
++  display_vblank_thread_ = std::thread([this]() { DisplayVblankThread(); });
+ 
+   return X_STATUS_SUCCESS;
+ }
+@@ -282,7 +283,6 @@ void GraphicsSystem::DisplayVblankThread() {
+   rex::thread::set_current_thread_name("Display VBlank");
+   using Clock = DisplayVblank::Clock;
+   const bool log = REXCVAR_GET(display_vblank_log);
+-  const bool follow = REXCVAR_GET(vblank_follows_display);
+   DisplayVblank display;
+   if (!display.Open()) {
+     REXGPU_WARN("Display vblank: no vblank event for the primary display; the guest vblank "
+@@ -398,6 +398,8 @@ void GraphicsSystem::DisplayVblankThread() {
+                   "refreshes held longer); the guest vblank stays on the host clock",
+                   measured_hz, display.mode_hz(), stretched);
+     }
++    // Read each second: the setting can change during the session.
++    const bool follow = REXCVAR_GET(vblank_follows_display);
+     const VblankDecision decision =
+         ChooseVblankSource(measured_hz, variable_refresh_seen, follow);
+     if (decision.source == VblankSource::kDisplay) {
+@@ -409,8 +411,9 @@ void GraphicsSystem::DisplayVblankThread() {
+       }
+     } else {
+       windows_allowing = 0;
+-      stop_following(variable_refresh_seen ? "variable refresh is active"
+-                                     : "the display's refresh is not a multiple of 60 Hz");
++      stop_following(!follow                ? "Lock to display is off"
++                     : variable_refresh_seen ? "variable refresh is active"
++                                             : "the display's refresh is not a multiple of 60 Hz");
+     }
+     if (log) {
+       REXGPU_INFO(

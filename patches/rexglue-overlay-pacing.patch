@@ -1,0 +1,68 @@
+diff --git a/include/rex/ui/imgui_dialog.h b/include/rex/ui/imgui_dialog.h
+index a7ab6b3..cba014c 100644
+--- a/include/rex/ui/imgui_dialog.h
++++ b/include/rex/ui/imgui_dialog.h
+@@ -39,6 +39,11 @@ class ImGuiDialog {
+ 
+   void Draw();
+ 
++  // True for a dialog with no input that is fine being redrawn only when the
++  // guest presents a new frame. While only such dialogs are shown, the UI is
++  // not repainted at the monitor refresh rate.
++  virtual bool PaintsWithGuestFrames() const { return false; }
++
+  protected:
+   ImGuiDialog(ImGuiDrawer* imgui_drawer);
+ 
+diff --git a/include/rex/ui/overlay/achievement_toast.h b/include/rex/ui/overlay/achievement_toast.h
+index 7642601..fe46bf4 100644
+--- a/include/rex/ui/overlay/achievement_toast.h
++++ b/include/rex/ui/overlay/achievement_toast.h
+@@ -35,6 +35,9 @@ class AchievementToastDialog : public AchievementNotificationDialog {
+   // Thread-safe: safe to call from any thread, including guest threads.
+   void Push(const rex::system::AchievementEvent& event) override;
+ 
++  // The fade is timed by the clock, so a guest frame's paint is enough.
++  bool PaintsWithGuestFrames() const override { return true; }
++
+  protected:
+   void OnDraw(ImGuiIO& io) override;
+ 
+diff --git a/src/ui/imgui_drawer.cpp b/src/ui/imgui_drawer.cpp
+index f270f3c..52a4d8b 100644
+--- a/src/ui/imgui_drawer.cpp
++++ b/src/ui/imgui_drawer.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <algorithm>
+ #include <cfloat>
+ #include <cstring>
+ #include <filesystem>
+@@ -436,9 +437,11 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
+   // it now if needed.
+   DetachIfLastDialogRemoved();
+ 
+-  if (!dialogs_.empty()) {
++  if (std::any_of(dialogs_.begin(), dialogs_.end(),
++                  [](const ImGuiDialog* dialog) { return !dialog->PaintsWithGuestFrames(); })) {
+     // Repaint (and handle input) continuously if still active. In detached mode
+     // there is no presenter; the app drives repaint via its own present loop.
++    // Dialogs that paint with guest frames are redrawn when the guest presents.
+     if (presenter_) {
+       presenter_->RequestUIPaintFromUIThread();
+     }
+diff --git a/src/ui/overlay/achievement_toast.cpp b/src/ui/overlay/achievement_toast.cpp
+index a07e12d..bed8b1a 100644
+--- a/src/ui/overlay/achievement_toast.cpp
++++ b/src/ui/overlay/achievement_toast.cpp
+@@ -22,7 +22,7 @@ AchievementToastDialog::AchievementToastDialog(ImGuiDrawer* drawer,
+                                                rex::Runtime* runtime)
+     : AchievementNotificationDialog(drawer), icon_cache_(immediate_drawer, runtime) {
+   // Registered only while a toast is queued: any registered dialog makes the presenter
+-  // repaint on the UI thread at the monitor refresh rate instead of pacing guest frames.
++  // paint on the UI thread instead of the guest output thread.
+   drawer->RemoveDialog(this);
+ }
+ 

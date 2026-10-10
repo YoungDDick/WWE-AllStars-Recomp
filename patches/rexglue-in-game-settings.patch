@@ -1,0 +1,170 @@
+diff --git a/include/rex/input/input_system.h b/include/rex/input/input_system.h
+index 1cb3faa..e5010ab 100644
+--- a/include/rex/input/input_system.h
++++ b/include/rex/input/input_system.h
+@@ -10,7 +10,9 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <functional>
+ #include <memory>
++#include <mutex>
+ #include <vector>
+ 
+ #include <rex/input/device_assignment.h>
+@@ -39,6 +41,15 @@ class InputSystem : public system::IInputSystem {
+   void AttachWindow(rex::ui::Window* window);
+   void SetActiveCallback(std::function<bool()> callback);
+ 
++  /// Host menus over the game (an in-game settings page): while hold returns
++  /// true, the game reads an idle controller and no keystrokes, and the real
++  /// state stays readable through HeldState. Adapted from wwe-svr2011-pc
++  /// (KaikoClanworth1), used with the author's permission.
++  void SetGuestInputHold(std::function<bool()> hold);
++  /// The last real state the game polled for user_index, as if no hold were
++  /// on. False if the user has not been polled or has no controller.
++  bool HeldState(uint32_t user_index, X_INPUT_STATE* out_state);
++
+   /// Replaces any previous assignment. Call before the guest starts polling.
+   void SetDeviceAssignment(std::unique_ptr<DeviceAssignment> assignment);
+ 
+@@ -54,10 +65,17 @@ class InputSystem : public system::IInputSystem {
+   InputDriver* DriverForDevice(DeviceId id);
+   const DeviceInfo* DeviceInfoFor(DeviceId id) const;
+ 
++  bool GuestInputHeld();
++
+   rex::ui::Window* window_ = nullptr;
+ 
+   std::vector<std::unique_ptr<InputDriver>> drivers_;
+ 
++  std::mutex hold_mutex_;
++  std::function<bool()> guest_input_hold_;
++  X_INPUT_STATE real_state_[4] = {};
++  bool has_real_state_[4] = {};
++
+   std::unique_ptr<DeviceAssignment> assignment_;
+   ActiveDeviceTracker active_devices_;
+ 
+diff --git a/src/core/cvar.cpp b/src/core/cvar.cpp
+index 228728d..5435ec5 100644
+--- a/src/core/cvar.cpp
++++ b/src/core/cvar.cpp
+@@ -535,13 +535,26 @@ std::vector<std::string> ListModifiedFlags() {
+   return result;
+ }
+ 
++// A TOML basic string: backslashes and quotes escaped, so Windows paths keep
++// the file parseable (unescaped, the loader rejects the whole config).
++static std::string TomlQuoted(const std::string& value) {
++  std::string quoted = "\"";
++  for (char c : value) {
++    if (c == '"' || c == '\\') {
++      quoted += '\\';
++    }
++    quoted += c;
++  }
++  return quoted + "\"";
++}
++
+ std::string SerializeToTOML() {
+   std::lock_guard lock(GetRegistryMutex());
+   std::string result;
+   for (const auto& entry : GetRegistryStorage()) {
+     if (entry.getter() != entry.default_value) {
+       if (entry.type == FlagType::String) {
+-        result += entry.name + " = \"" + entry.getter() + "\"\n";
++        result += entry.name + " = " + TomlQuoted(entry.getter()) + "\n";
+       } else {
+         result += entry.name + " = " + entry.getter() + "\n";
+       }
+@@ -556,7 +569,7 @@ std::string SerializeToTOML(std::string_view category) {
+   for (const auto& entry : GetRegistryStorage()) {
+     if (entry.category == category && entry.getter() != entry.default_value) {
+       if (entry.type == FlagType::String) {
+-        result += entry.name + " = \"" + entry.getter() + "\"\n";
++        result += entry.name + " = " + TomlQuoted(entry.getter()) + "\n";
+       } else {
+         result += entry.name + " = " + entry.getter() + "\n";
+       }
+diff --git a/src/input/input_system.cpp b/src/input/input_system.cpp
+index 813bb1c..09466ac 100644
+--- a/src/input/input_system.cpp
++++ b/src/input/input_system.cpp
+@@ -71,6 +71,30 @@ void InputSystem::SetActiveCallback(std::function<bool()> callback) {
+   }
+ }
+ 
++void InputSystem::SetGuestInputHold(std::function<bool()> hold) {
++  std::lock_guard lock(hold_mutex_);
++  guest_input_hold_ = std::move(hold);
++}
++
++bool InputSystem::GuestInputHeld() {
++  std::function<bool()> hold;
++  {
++    std::lock_guard lock(hold_mutex_);
++    hold = guest_input_hold_;
++  }
++  // Called unlocked: the hold may read HeldState (a combo that opens a menu).
++  return hold && hold();
++}
++
++bool InputSystem::HeldState(uint32_t user_index, X_INPUT_STATE* out_state) {
++  std::lock_guard lock(hold_mutex_);
++  if (user_index >= 4 || !has_real_state_[user_index]) {
++    return false;
++  }
++  *out_state = real_state_[user_index];
++  return true;
++}
++
+ void InputSystem::SetDeviceAssignment(std::unique_ptr<DeviceAssignment> assignment) {
+   assignment_ = std::move(assignment);
+   if (assignment_) {
+@@ -243,8 +267,20 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+   }
+ 
+   if (!any) {
++    if (user_index < 4) {
++      std::lock_guard lock(hold_mutex_);
++      has_real_state_[user_index] = false;
++    }
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
++  if (user_index < 4) {
++    std::lock_guard lock(hold_mutex_);
++    real_state_[user_index] = merged;
++    has_real_state_[user_index] = true;
++  }
++  if (GuestInputHeld()) {
++    merged.gamepad = {};  // the packet number still advances with the real pad
++  }
+   if (out_state) {
+     *out_state = merged;
+   }
+@@ -299,6 +335,10 @@ X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+ 
++  if (GuestInputHeld()) {
++    return X_ERROR_EMPTY;
++  }
++
+   RefreshDevices();
+   std::vector<DeviceId> ids;
+   assignment_->DevicesForUser(user_index, ids);
+diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
+index 48267d1..3a15805 100644
+--- a/src/ui/rex_app.cpp
++++ b/src/ui/rex_app.cpp
+@@ -410,7 +410,8 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
+       console_overlay_ = std::make_unique<ui::ConsoleDialog>(imgui_drawer_.get(), log_sink_);
+     }
+   });
+-  rex::ui::RegisterBind("bind_settings", "F4", "Toggle settings overlay", [this] {
++  // F4 belongs to the game's own settings page; the cvar overlay moves to F6.
++  rex::ui::RegisterBind("bind_settings", "F6", "Toggle settings overlay", [this] {
+     if (settings_overlay_) {
+       settings_overlay_.reset();
+     } else {

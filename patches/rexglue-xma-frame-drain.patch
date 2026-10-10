@@ -1,0 +1,123 @@
+diff --git a/include/rex/audio/xma/work_rules.h b/include/rex/audio/xma/work_rules.h
+index 23c0804..d9a9c49 100644
+--- a/include/rex/audio/xma/work_rules.h
++++ b/include/rex/audio/xma/work_rules.h
+@@ -12,7 +12,8 @@
+  * with input still valid marks the input exhausted, so the title finishes the
+  * stream instead of waiting for PCM that never comes.
+  *
+- * @modified    WWE All Stars recomp, 2026 - XMA output-valid rule
++ * @modified    WWE All Stars recomp, 2026 - XMA output-valid rule; frame drain
++ *              and progress break from Xenia Canary (BSD-3)
+  */
+ 
+ namespace rex::audio::xma {
+@@ -25,6 +26,8 @@ struct PassOutcome {
+   // A frame runs into the next input buffer, which the title has not marked
+   // valid yet (error_status 4): waiting on the title, not stalled.
+   bool waiting_for_next_buffer = false;
++  // A decoded frame is only partly in the ring (the ring ran out of room).
++  bool frame_pending = false;
+ };
+ 
+ struct PassDecision {
+@@ -39,9 +42,31 @@ constexpr PassDecision DecideAfterPass(const PassOutcome& o) {
+       o.input_valid && o.room_for_decode && !o.progressed && !o.waiting_for_next_buffer;
+   return PassDecision{
+       .output_valid = !o.ring_full,
+-      .keep_decoding = o.input_valid && !stalled,
++      .keep_decoding = (o.input_valid || o.frame_pending) && !stalled,
+       .input_exhausted = stalled,
+   };
+ }
+ 
++struct LoopState {
++  bool room_for_decode;  // free blocks for one more decode step
++  bool input_valid;      // an input buffer is still valid
++  bool frame_pending;    // a decoded frame is only partly in the ring
++  bool waiting_for_next_buffer;  // error_status 4 (see PassOutcome)
++  bool progressed = true;  // this round wrote PCM or moved the input
++};
++
++// Whether a decode pass goes round its loop again. A frame already decoded is
++// delivered in full while there is room, even when the input has run dry or
++// waits for the next buffer: the title polls for those samples and may never
++// issue the kick that would deliver them. A round that moved nothing ends
++// the pass, as another would do the same. Ported from Xenia Canary
++// (xma_context_new.cc, commit 6bef1fbed1 and its decoder-progress break,
++// BSD-3).
++constexpr bool KeepPassGoing(const LoopState& s) {
++  if (!s.room_for_decode || !s.progressed) {
++    return false;
++  }
++  return s.frame_pending || (s.input_valid && !s.waiting_for_next_buffer);
++}
++
+ }  // namespace rex::audio::xma
+diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
+index f290ce3..81298a2 100644
+--- a/src/audio/xma_context.cpp
++++ b/src/audio/xma_context.cpp
+@@ -7,6 +7,8 @@
+ ******************************************************************************
+ *
+ * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
++* @modified    WWE All Stars recomp, 2026 - Output-valid rule and frame drain
++*              (xma/work_rules.h), parts from Xenia Canary (BSD-3)
+ */
+ 
+ #include <algorithm>
+@@ -110,9 +112,9 @@ bool XmaContext::Work() {
+   const XMA_CONTEXT_DATA initial_data = data;
+ 
+   // Not valid means the ring is full: nothing to do until the title reads.
+-  // With input left the context stays eligible (xma/work_rules.h).
++  // With input or a frame left the context stays eligible (xma/work_rules.h).
+   if (!data.output_buffer_valid) {
+-    set_is_enabled(data.IsAnyInputBufferValid());
++    set_is_enabled(data.IsAnyInputBufferValid() || current_frame_remaining_subframes_ > 0);
+     return false;
+   }
+ 
+@@ -144,17 +146,28 @@ bool XmaContext::Work() {
+       static_cast<int32_t>(effective_sdc) + data.output_buffer_padding;
+ 
+   if (minimum_subframe_decode_count > remaining_subframe_blocks_in_output_buffer_) {
+-    // No room yet: stays eligible while it has input, like a full ring.
+-    set_is_enabled(data.IsAnyInputBufferValid());
++    // No room yet: stays eligible while it has input or a frame to finish.
++    set_is_enabled(data.IsAnyInputBufferValid() || current_frame_remaining_subframes_ > 0);
+     StoreContextMerged(data, initial_data, context_ptr);
+     return false;
+   }
+ 
+   while (remaining_subframe_blocks_in_output_buffer_ >= minimum_subframe_decode_count) {
++    const uint32_t read_offset_before = data.input_buffer_read_offset;
++    const uint32_t buffer_before = data.current_buffer;
+     Decode(&data);
+-    blocks_written += Consume(&output_rb, &data);
+-
+-    if (!data.IsAnyInputBufferValid() || data.error_status == 4) {
++    const uint32_t written = Consume(&output_rb, &data);
++    blocks_written += written;
++
++    if (!xma::KeepPassGoing({
++            .room_for_decode =
++                remaining_subframe_blocks_in_output_buffer_ >= minimum_subframe_decode_count,
++            .input_valid = data.IsAnyInputBufferValid(),
++            .frame_pending = current_frame_remaining_subframes_ > 0,
++            .waiting_for_next_buffer = data.error_status == 4,
++            .progressed = written > 0 || data.input_buffer_read_offset != read_offset_before ||
++                          data.current_buffer != buffer_before,
++        })) {
+       break;
+     }
+   }
+@@ -173,6 +186,7 @@ bool XmaContext::Work() {
+       .input_valid = data.IsAnyInputBufferValid(),
+       .progressed = progressed,
+       .waiting_for_next_buffer = data.error_status == 4,
++      .frame_pending = current_frame_remaining_subframes_ > 0,
+   });
+   if (!decision.output_valid) {
+     data.output_buffer_valid = 0;

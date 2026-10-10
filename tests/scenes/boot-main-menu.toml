@@ -1,0 +1,47 @@
+# Boot -> title -> AUTOSAVE notice -> main menu, with the unlock code entered
+# (ticket 22's tracer scene). Route and frames from scripts/input/menus-frames.txt.
+# Run: python scripts/scene_runner.py tests/scenes/boot-main-menu.toml
+
+name = "boot-main-menu"
+from = "boot"
+
+# Scripted pad (src/script_input.h grammar); `at` anchors to guest frames, ±1.
+input = """
+# Title: START is ignored while the logo animates in.
+at 2900
+press START 6f
+# AUTOSAVE notice
+at 3200
+press A 6f
+# Main menu: UnlockAll, then close the popup, then Up back to EXHIBITION.
+at 3700
+press LEFT 6f
+press Y 6f
+press DOWN 6f
+press LEFT 6f
+press Y 6f
+press X 6f
+press LEFT 6f
+press X 6f
+press Y 6f
+press DOWN 6f
+press RIGHT 6f
+press X 6f
+press LEFT 6f
+press UP 6f
+press X 6f
+press RIGHT 6f
+at 4400
+press A 6f
+at 4600
+press UP 6f
+"""
+
+# The main menu shows a random wrestler per boot, which the Emulated envelope
+# cannot absorb, so no capture shows it unobscured (tickets 22 and 30).
+[[capture]]  # title, PRESS START
+frame = 2700
+[[capture]]  # AUTOSAVE notice: Native misses the autosave indicator (ticket 03)
+frame = 3150
+[[capture]]  # "YOU HAVE UNLOCKED: Everything!" popup over the dimmed main menu
+frame = 4300
