@@ -78,7 +78,7 @@ public sealed record LauncherOptions(PortableLayout Layout, bool PrintArguments)
             }
         }
         // Without --game-data, the folder chosen at setup, remembered in userdata.
-        gameData ??= LauncherState.Load(new PortableLayout(root).UserDataDirectory).GameDataDirectory;
+        gameData ??= LauncherState.RememberedGameData(new PortableLayout(root).UserDataDirectory);
         var options = new LauncherOptions(new PortableLayout(root, gameData, game), printArguments)
         {
             VerifyImage = verify,

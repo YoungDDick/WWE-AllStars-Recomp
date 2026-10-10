@@ -40,10 +40,10 @@ public sealed class WindowPlacementTests : IDisposable
         LauncherState.RememberGameData(UserData, gameData);
 
         Assert.Equal(Placement, LauncherState.Load(UserData).Window);
-        Assert.Equal(gameData, LauncherState.Load(UserData).GameDataDirectory);
+        Assert.Equal(gameData, LauncherState.RememberedGameData(UserData));
 
         LauncherState.RememberWindow(UserData, Placement with { X = 2400 });
-        Assert.Equal(gameData, LauncherState.Load(UserData).GameDataDirectory);
+        Assert.Equal(gameData, LauncherState.RememberedGameData(UserData));
         Assert.Equal(2400, LauncherState.Load(UserData).Window!.X);
     }
 

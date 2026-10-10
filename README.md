@@ -32,12 +32,13 @@ and refuses anything else.
 | | |
 | --- | --- |
 | Tested and playable | Exhibition 1v1 with entrances, finishers and the result screen; Path of Champions; Fantasy Warfare; Create a Superstar; 4 local players; DLC wrestlers (Million Dollar Pack); online Player Match |
-| Tested hardware | Windows 11 with an AMD Radeon RX 7900 XT; Steam Deck |
-| Not tested yet | NVIDIA and Intel GPUs, Windows 10, Linux and Proton on a desktop |
+| Tested hardware | Windows 11 with an AMD Radeon RX 7900 XT; Steam Deck on SteamOS through Proton, at 60 fps on the Low preset |
+| Not tested yet | NVIDIA and Intel GPUs, Windows 10, desktop Linux |
 | Not supported | Ranked Match and leaderboards; the in-game store (add DLC from the launcher) |
 
-The game runs at its original 60 frames per second. Anything not listed above may still
-crash; an [issue](../../issues/new/choose) with the session log attached helps fix it.
+The game runs at its original 60 frames per second, on the Steam Deck too. Anything not
+listed above may still crash; an [issue](../../issues/new/choose) with the session log
+attached helps fix it.
 
 <table>
   <tr>
@@ -56,25 +57,26 @@ crash; an [issue](../../issues/new/choose) with the session log attached helps f
 
 The Native renderer intercepts the game's Direct3D 9 calls and draws them with Vulkan,
 instead of emulating the Xbox 360 GPU. It is the default. The emulated renderer from
-ReXGlue stays available as **Emulated**, as a fallback and as a reference.
+ReXGlue stays available as Emulated, as a fallback and as a reference.
 
 Native adds image options the console never had:
 
-- **Supersampling**: renders 2x2 and filters down, which is the anti-aliasing (on by default)
-- **Render resolution**: 720p, 1440p or 2160p
-- **Sharpening** with AMD FidelityFX CAS: Off, Low, Medium or High
-- **Texture filtering**: anisotropic, up to 16x
-- **Colour**: *Original* keeps the Xbox 360's gamma curve, as in Xenia; *Natural* uses sRGB
-  for more detail in dark areas
-- **Graphics presets** Low, Medium and High. On first start the game suggests one from your
-  GPU: Low for a Steam Deck or an integrated GPU, Medium for a small discrete GPU, High otherwise.
+| Setting | Choices |
+| --- | --- |
+| Supersampling | Renders 2x2 and filters down; this is the anti-aliasing. On by default |
+| Render resolution | 720p, 1440p or 2160p |
+| Sharpening (AMD FidelityFX CAS) | Off, Low, Medium or High |
+| Texture filtering | Anisotropic, up to 16x |
+| Colour | Original, the Xbox 360's gamma curve as in Xenia, or Natural (sRGB), with more detail in dark areas |
+| Graphics preset | Low, Medium or High. On first start the game suggests one for your GPU: Low for a Steam Deck or an integrated GPU, Medium for a small discrete GPU, High otherwise |
 
 ### Shaders built before you play
 
 Setup converts the game's shaders once, then builds every pipeline the game is known to
 use before the first match, on all CPU cores. On GPUs with graphics pipeline libraries, a
 pipeline that wasn't built ahead is linked from prebuilt parts instead of compiled on the
-spot. The game paces itself at an even 60 Hz and can follow your display's refresh.
+spot. The game paces itself at an even 60 Hz, and with Lock to display on it times its
+frames to your display when the refresh rate is a multiple of 60.
 
 ### Settings inside the game
 
@@ -85,10 +87,10 @@ game share one settings file.
 
 ### Enhanced vibration
 
-The Xbox 360 game rumbles only for aerial hits. **Enhanced** vibration, the default, gives
+The Xbox 360 game rumbles only for aerial hits. Enhanced vibration, the default, gives
 every hit a pulse sized by the kind of move, plus finishers landing on you, slams to the
-mat, your own hits connecting, reversals and critical health. **Original** keeps the
-console's behaviour, and a strength setting scales both.
+mat, your own hits connecting, reversals and critical health. Original keeps the console's
+behaviour, and a strength setting scales both.
 
 ### Online Player Match (experimental)
 
@@ -124,7 +126,7 @@ block before it is installed.
 </table>
 
 The launcher verifies your disc image and update, copies the game files, prepares shaders
-and pipelines, and then stays out of the way. It also repairs a damaged install, opens the
+and pipelines. It also repairs a damaged install, opens the
 newest log for a bug report, makes desktop and Start menu shortcuts, picks the GPU, and
 tells you when a new release is out (it only checks, it never downloads).
 
@@ -166,16 +168,13 @@ inside (a whole USB `Content` folder works) or a zip, 7z or rar.
 
 ### If something is off
 
-- **Motion isn't quite even:** turn on variable refresh (FreeSync or G-Sync) if your display
-  has it, or use a refresh rate that is a multiple of 60 (60, 120, 240 Hz). On a 144 or
-  165 Hz display without variable refresh, frames alternate between 2 and 3 refreshes.
-- **Slow on a weak GPU:** pick the Low preset under GRAPHICS. Supersampling is the costly
-  setting.
-- **The game started on Emulated:** the launcher says why, and **Prepare shaders** fixes the
-  usual cause.
-- **Crash or wrong graphics:** choose **Open logs** in the launcher, zip the session folder it
-  opens and attach it to a [bug report](../../issues/new/choose). A log can contain folder
-  paths that show your Windows user name; check it before posting.
+| What you see | What to do |
+| --- | --- |
+| Motion isn't quite even | Turn on variable refresh (FreeSync or G-Sync) if your display has it, or use a refresh rate that is a multiple of 60 (60, 120, 240 Hz). On a 144 or 165 Hz display without variable refresh, frames alternate between 2 and 3 refreshes |
+| Slow on a weak GPU | Pick the Low preset under GRAPHICS. Supersampling is the costly setting |
+| The game started on Emulated | The launcher says why; Prepare shaders fixes the usual cause |
+| Setup starts again after moving the folder | Releases up to 1.0.0 remember the game files by their full path. Delete `userdata\launcher-state.json` and the launcher finds the `gamedata` folder beside it again. Later releases handle a moved folder on their own |
+| A crash or wrong graphics | Choose Open logs in the launcher, zip the session folder it opens and attach it to a [bug report](../../issues/new/choose). A log can contain folder paths that show your Windows user name; check it before posting |
 
 ## FAQ
 
@@ -200,13 +199,14 @@ On the disc version the game switches DLC loading off. Building on the update ma
 work, and it's the game's final version.
 
 **Does it run on Steam Deck or Linux?**
-It has been played on a Steam Deck, and the game suggests the Low preset there. Linux and
-Proton haven't been tested on a desktop yet.
+Yes on the Steam Deck: add the launcher to Steam as a non-Steam game and run it through
+Proton on SteamOS. It plays at 60 fps on the Low preset, which the game picks on a Deck by
+itself. Desktop Linux hasn't been tested yet.
 
 **Was AI used?**
 Yes, a lot. I'm a software engineer, and most of the code and the docs were written with
-Claude Code, an AI coding agent. I steered the work,
-played and tested every change, and decided what ships. The measurements, investigations
+Claude Code, an AI coding agent. I steered the work, played and tested every change, and
+decided what ships. The measurements, investigations
 and decisions are written down in [`docs/`](docs), so anyone can check them.
 
 ## Build from source

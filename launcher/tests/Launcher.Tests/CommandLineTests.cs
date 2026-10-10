@@ -165,6 +165,47 @@ public sealed class CommandLineTests : IDisposable
     }
 
     [Fact]
+    public void A_set_up_folder_still_finds_its_game_data_after_it_is_moved()
+    {
+        var (iso, manifest) = WriteDisc(new TestDisc());
+        var install = Path.Combine(_root, "install");
+        var moved = Path.Combine(_root, "moved install");
+        Assert.Equal(0, HeadlessCommands.Run(
+            LauncherOptions.Parse(["--extract", iso, "--manifest", manifest, .. Tu()], install), new StringWriter(), () => Now));
+
+        Directory.Move(install, moved);
+        var reopened = LauncherOptions.Parse([], moved);
+
+        Assert.Equal(Path.Combine(moved, "gamedata"), reopened.Layout.GameDataDirectory);
+    }
+
+    [Fact]
+    public void A_remembered_folder_that_is_gone_gives_way_to_the_game_data_beside_the_launcher()
+    {
+        // What a release before relative paths saved, copied to another PC.
+        var userData = new PortableLayout(_root).UserDataDirectory;
+        new LauncherState { GameDataDirectory = Path.Combine(_root, "old pc", "gamedata") }.Save(userData);
+        Directory.CreateDirectory(Path.Combine(_root, "gamedata"));
+
+        var options = LauncherOptions.Parse([], _root);
+
+        Assert.Equal(Path.Combine(_root, "gamedata"), options.Layout.GameDataDirectory);
+    }
+
+    [Fact]
+    public void A_remembered_folder_that_is_gone_is_kept_when_there_is_no_game_data_beside_the_launcher()
+    {
+        // An unplugged drive: setup must not quietly move the game data elsewhere.
+        var userData = new PortableLayout(_root).UserDataDirectory;
+        var unplugged = Path.Combine(_root, "unplugged drive", "gamedata");
+        new LauncherState { GameDataDirectory = unplugged }.Save(userData);
+
+        var options = LauncherOptions.Parse([], _root);
+
+        Assert.Equal(unplugged, options.Layout.GameDataDirectory);
+    }
+
+    [Fact]
     public void Repair_lists_the_bad_files_and_re_extracts_them()
     {
         var disc = new TestDisc();

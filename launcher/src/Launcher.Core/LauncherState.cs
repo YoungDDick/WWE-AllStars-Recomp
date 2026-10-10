@@ -32,9 +32,40 @@ public sealed record LauncherState
         }
     }
 
-    /// <summary>Records the chosen game data folder and keeps the rest of the state.</summary>
+    /// <summary>
+    /// Records the chosen game data folder and keeps the rest of the state. A folder inside the
+    /// launcher's folder is stored relative to it, so moving or copying the install keeps it.
+    /// </summary>
     public static void RememberGameData(string userDataDirectory, string gameDataDirectory) =>
-        (Load(userDataDirectory) with { GameDataDirectory = gameDataDirectory }).Save(userDataDirectory);
+        (Load(userDataDirectory) with { GameDataDirectory = Portable(RootOf(userDataDirectory), gameDataDirectory) })
+            .Save(userDataDirectory);
+
+    /// <summary>
+    /// The remembered game data folder as a full path, or null when none is remembered or it is
+    /// gone while the launcher's own <c>gamedata</c> folder exists (an install copied from another
+    /// PC by a release that stored full paths). A folder that is gone with nothing beside the
+    /// launcher, such as one on an unplugged drive, is kept.
+    /// </summary>
+    public static string? RememberedGameData(string userDataDirectory)
+    {
+        if (Load(userDataDirectory).GameDataDirectory is not { } saved) return null;
+        var root = RootOf(userDataDirectory);
+        var full = Path.GetFullPath(saved, root);
+        return !Directory.Exists(full) && Directory.Exists(Path.Combine(root, "gamedata")) ? null : full;
+    }
+
+    // The user data folder always sits in the launcher's folder (PortableLayout).
+    private static string RootOf(string userDataDirectory) =>
+        Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(userDataDirectory)))!;
+
+    private static string Portable(string root, string gameDataDirectory)
+    {
+        var full = Path.GetFullPath(gameDataDirectory);
+        var relative = Path.GetRelativePath(root, full);
+        var outside = Path.IsPathRooted(relative) || relative == ".." ||
+            relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal);
+        return outside ? full : relative;
+    }
 
     /// <summary>Records the window's placement and keeps the rest of the state.</summary>
     public static void RememberWindow(string userDataDirectory, WindowPlacement window) =>
