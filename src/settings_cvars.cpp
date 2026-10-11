@@ -37,6 +37,10 @@ REXCVAR_DEFINE_INT32(wwe_native_anisotropy, 3, "WWEAllStars",
                      "Native renderer: anisotropic filtering for linear, mipmapped textures, as "
                      "anisotropic_override (-1 = the game's setting, 0 = off, 1..5 = 1x..16x)")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+// Asked at every engine tick's step choice (game_tick_log.cpp), so a change applies at once.
+REXCVAR_DEFINE_BOOL(wwe_60fps_entrances, true, "WWEAllStars",
+                    "Run entrances and the arena intro at 60 fps instead of the original 30 "
+                    "(an Enhancement)");
 // Asked on every pad request and every hit, so a change applies at once.
 REXCVAR_DEFINE_INT32(wwe_vibration_mode, 2, "WWEAllStars",
                      "Pad vibration: 0 = Off, 1 = Original (the Xbox 360's aerial hit pulse "

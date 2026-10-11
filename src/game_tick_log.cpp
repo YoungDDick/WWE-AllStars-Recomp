@@ -10,6 +10,10 @@
 // docs/research/spin-loops.md §1 and §5): the limiter sleeps until shortly before the
 // deadline the guest loop tests, and the render-thread wait backs off like D3D's GPU wait
 // (gpu_wait.cpp); the guest's own tests still decide when each wait ends.
+//
+// Two midasm hooks make 60 fps entrances (wwe_60fps_entrances): the tick's step choice
+// steps flagged cinematics at 1/60 s instead of 1/30 s, and the crowd scheduler then
+// ticks the whole crowd every tick.
 
 #include "generated/default/wweallstars_pch.h"
 
@@ -32,6 +36,7 @@ REXCVAR_DEFINE_BOOL(wwe_limiter_sleep, true, "WWEAllStars",
                     "Let the game thread's frame waits (the 60 Hz limiter and the wait on the "
                     "render thread) sleep instead of spinning a host core (false: the game's "
                     "own appSleep(0) yield loops, for comparisons)");
+REXCVAR_DECLARE(bool, wwe_60fps_entrances);  // settings_cvars.cpp
 
 namespace {
 
@@ -53,6 +58,11 @@ constexpr uint32_t kLimiterReturn = 0x82417D74;
 constexpr uint32_t kRenderWaitReturn = 0x8271CC08;
 // Set together with two clear flags, the tick steps 1/30 s instead of 1/60 s.
 constexpr uint32_t kHalfRateFlag = 0x83709514;
+// The command-line switches that force 1/60 s whatever the flag (-BENCHMARK, -DUMPMOVIE).
+constexpr uint32_t kBenchmarkFlag = 0x83709510;
+constexpr uint32_t kDumpMovieFlag = 0x83709530;
+// The countdown the 1/30 path holds at 5; at 0 the helper tick 0x82410988 runs.
+constexpr uint32_t kHalfRateCountdown = 0x835E0088;
 constexpr double kSlowTickMs = 20.0;
 
 thread_local bool t_in_tick = false;
@@ -68,7 +78,7 @@ thread_local Clock::time_point t_render_wait_start;
 
 struct Second {
   Clock::time_point start{};
-  uint32_t ticks = 0, half_rate_ticks = 0, other_step_ticks = 0;
+  uint32_t ticks = 0, half_rate_ticks = 0, other_step_ticks = 0, at_60_ticks = 0;
   double work_sum_ms = 0, work_max_ms = 0, total_max_ms = 0;
   float dilation_min = 1e9f, dilation_max = -1e9f;
 } g_second;
@@ -95,9 +105,15 @@ double LimiterRemaining(const uint8_t* base, uint32_t self) {
   return LoadF64(base, self + kFrameStartOffset) + dt - LoadF64(base, kCurrentTime);
 }
 
+void StoreU32(uint8_t* base, uint32_t address, uint32_t value) {
+  value = std::byteswap(value);
+  std::memcpy(base + address, &value, sizeof(value));
+}
+
 double Ms(Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); }
 
-void Record(const uint8_t* base, uint32_t self, Clock::duration total, const Waits& waits) {
+void Record(const uint8_t* base, uint32_t self, Clock::duration total, const Waits& waits,
+            bool at_60) {
   const double total_ms = Ms(total);
   const double work_ms = std::max(0.0, total_ms - waits.Total() / 1e6);
   const float step = LoadF32(base, self + kDeltaSecondsOffset);
@@ -116,6 +132,7 @@ void Record(const uint8_t* base, uint32_t self, Clock::duration total, const Wai
     s.start = now;
   }
   ++s.ticks;
+  s.at_60_ticks += at_60;
   s.half_rate_ticks += std::abs(step - 1.0f / 30) < 1e-4f;
   s.other_step_ticks += std::abs(step - 1.0f / 60) >= 1e-4f && std::abs(step - 1.0f / 30) >= 1e-4f;
   s.work_sum_ms += work_ms;
@@ -124,10 +141,12 @@ void Record(const uint8_t* base, uint32_t self, Clock::duration total, const Wai
   s.dilation_min = std::min(s.dilation_min, dilation);
   s.dilation_max = std::max(s.dilation_max, dilation);
   if (now - s.start >= std::chrono::seconds(1)) {
-    REXLOG_INFO("game tick 1s: {} ticks ({} at 1/30 s, {} other steps), work mean {:.2f} ms "
-                "max {:.1f} ms, tick max {:.1f} ms, dilation {:.3f}..{:.3f}",
-                s.ticks, s.half_rate_ticks, s.other_step_ticks, s.work_sum_ms / s.ticks,
-                s.work_max_ms, s.total_max_ms, s.dilation_min, s.dilation_max);
+    REXLOG_INFO("game tick 1s: {} ticks ({} at 1/30 s, {} other steps, {} cinematic at "
+                "1/60 s), work mean {:.2f} ms max {:.1f} ms, tick max {:.1f} ms, dilation "
+                "{:.3f}..{:.3f}",
+                s.ticks, s.half_rate_ticks, s.other_step_ticks, s.at_60_ticks,
+                s.work_sum_ms / s.ticks, s.work_max_ms, s.total_max_ms, s.dilation_min,
+                s.dilation_max);
     s = Second{};
     s.start = now;
   }
@@ -143,10 +162,11 @@ REX_HOOK_RAW(sub_82417780) {
   t_in_tick = true;
   t_self = self;
   t_waits = {};
+  const bool at_60 = REXCVAR_GET(wwe_60fps_entrances) && LoadU32(base, kHalfRateFlag) != 0;
   __imp__sub_82417780(ctx, base);
   t_in_tick = false;
   if (REXCVAR_GET(wwe_tick_log)) {
-    Record(base, self, Clock::now() - start, t_waits);
+    Record(base, self, Clock::now() - start, t_waits, at_60);
   }
 }
 
@@ -194,3 +214,40 @@ REX_HOOK_RAW(sub_82608EF8) {
       std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count());
   (limiter ? t_waits.limiter_ns : render_wait ? t_waits.render_ns : t_waits.other_ns) += took;
 }
+
+namespace {
+
+// The setting is on and a flagged cinematic plays, with neither switch that already
+// forces 1/60 s.
+bool InSixtyFpsCinematic() {
+  if (!REXCVAR_GET(wwe_60fps_entrances)) {
+    return false;
+  }
+  const uint8_t* base = REX_KERNEL_MEMORY()->virtual_membase();
+  return LoadU32(base, kHalfRateFlag) != 0 && LoadU32(base, kBenchmarkFlag) == 0 &&
+         LoadU32(base, kDumpMovieFlag) == 0;
+}
+
+}  // namespace
+
+// 60 fps entrances (.scratch/60fps-entrances/spec.md; docs/research/60fps-entrances.md
+// §1.1, §6 E3): the tick's step choice at 0x824178CC loads the 1/30 flag. True jumps to
+// the 1/60 path at 0x82417910 for a flagged cinematic (the arena intro, entrances), as
+// the game's own -BENCHMARK/-DUMPMOVIE checks do; the flag itself is left set, so the
+// skip input (0x824F03E8) and the Matinee's Play/Stop see it. The 1/30 path stores 5 to
+// the countdown; the 1/60 path decrements it (0x82417918-0x8241792C), so 6 leaves the
+// same 5 and the helper tick 0x82410988 stays off as on the console.
+bool Wwe60fpsEntrances() {
+  if (!InSixtyFpsCinematic()) {
+    return false;
+  }
+  StoreU32(REX_KERNEL_MEMORY()->virtual_membase(), kHalfRateCountdown, 6);
+  return true;
+}
+
+// 60 fps entrances, crowd (ticket 02, docs/research/60fps-entrances.md §8): at a 1/60 s
+// step the crowd scheduler 0x82B55A38 ticks one of its two crowd groups per tick, so the
+// crowd animates at 30 Hz (as in matches). In a flagged cinematic stepped at 1/60 s, true
+// takes the scheduler's own path for steps of 1/30 s and over (0x82B55AA0): every crowd
+// group ticks every tick with the real step, as all of them do in the 30 Hz original.
+bool Wwe60fpsCrowd() { return InSixtyFpsCinematic(); }

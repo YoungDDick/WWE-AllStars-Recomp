@@ -121,6 +121,9 @@ inline std::vector<Setting> PlayerSettings() {
        "Original shows the Xbox 360's colours, richer, with deeper shadows, as in Xenia. "
        "Natural is softer, with more detail in dark areas. Native only.",
        /*startup=*/true, /*native_only=*/true},
+      {"wwe_60fps_entrances", "60 fps entrances", "GRAPHICS", {{"false", "Off"}, {"true", "On"}},
+       "Runs wrestler entrances and the arena intro at 60 fps instead of the original 30.",
+       /*startup=*/true},
       {"audio_mute", "Mute", "AUDIO", {{"false", "Off"}, {"true", "On"}},
        "Silences all game audio."},
       {"wwe_vibration_mode", "Vibration", "CONTROLS",

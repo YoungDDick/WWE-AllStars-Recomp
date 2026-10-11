@@ -534,7 +534,7 @@ def display_summary(windows, samples):
     return summary
 
 
-TICK_SECOND = re.compile(r"game tick 1s: (\d+) ticks \((\d+) at 1/30 s, \d+ other steps\), "
+TICK_SECOND = re.compile(r"game tick 1s: (\d+) ticks \((\d+) at 1/30 s, \d+ other steps[^)]*\), "
                          r"work mean ([\d.]+) ms")
 
 

@@ -27,7 +27,7 @@ pwsh ./scripts/build.ps1 -Action Build -Jobs 20
 pwsh ./scripts/build.ps1 -Action Launcher      # launcher (Native AOT) -> out/launcher/publish
 pwsh ./scripts/build.ps1 -Action LauncherTest  # launcher xUnit tests (pinned .NET SDK)
 pwsh ./scripts/build.ps1 -Action Image        # TU2 memory image -> analysis/xex/tu2.pe
-python scripts/disasm.py <hex addr> [count]   # disassemble the TU2 image
+python scripts/disasm.py <hex addr> [count]   # disassemble the TU2 image, VMX128 included
 python scripts/tu_addrmap.py <paths>          # map base v5 addresses to TU2 (report only)
 python scripts/inspect_disc.py <iso> --extract-all assets
 ```
@@ -48,6 +48,24 @@ python scripts/inspect_disc.py <iso> --extract-all assets
   `disasm.py` and the analysis scripts. `analysis/xex/default.pe` is the base v5
   image, kept as `tu_addrmap.py` input (file offset = address − 0x82000000).
 - `docs/research/`: TU research and the Xenia baseline.
+
+## Reverse engineering
+
+- Ghidra (the `mcp__ghidra__*` MCP, Ghidra 12.1.4 at `D:\tools\ghidra-mcp`) holds
+  TU2 as program `default.xexp` in project `ghidra/WWEAllStarsTU2`: Xenon360
+  extension, language `PowerPC:BE:64:Xenon-VMX128-32addr`, fully auto-analysed,
+  kernel imports named. Open it with `project_program_open_existing` (location
+  `D:\Projects\WWE_ALLSTARS-RECOMP\ghidra`). `ghidra/` is gitignored.
+  `ghidra/WWEAllStars` is the base v5 image at base addresses; use it only for
+  base-to-TU2 work.
+- A Ghidra project opens in one process at a time, read-only included: a
+  `ghidra/<project>.lock` held by another session's MCP gives `LockException`.
+  Then read through `disasm.py`, or ask the owner to close that session.
+- Xenon360 leaves the VMX128 pack instructions (`vpk*128`) undecoded; a
+  decompile with a hole there gets read through `disasm.py`, which decodes them.
+- Headless Ghidra (`support/analyzeHeadless.bat`) needs `GHIDRA_HEADLESS_MAXMEM=10G`;
+  the 2 GB default runs out of heap in analysis.
+- Tools still missing, ranked by payoff: `docs/research/tooling-recommendations.md`.
 
 ## Known game facts
 

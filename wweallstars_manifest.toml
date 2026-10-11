@@ -441,3 +441,27 @@ address = 0x829E1020
 name = "WweOnlineTrace_829E1020"
 registers = ["r3", "r4", "r5", "r6", "r12"]
 after_instruction = true
+
+# 60 fps entrances (.scratch/60fps-entrances/spec.md; docs/research/60fps-entrances.md
+# §1.1). FEngineLoop::Tick 0x82417780 picks its step at 0x824178CC: lis r11,-0x7c8f /
+# lwz r11,-0x6aec(r11) loads the 1/30 flag 0x83709514; beq 0x82417910 takes the 1/60
+# path (lfs f31,0x1ccc = 1/60), else li r11,5 / lfs f31,0x2f38 (1/30) / stw to
+# 0x835E0088. Reached by fall-through from 0x824178C8 and bge cr6 at 0x824178A4. True
+# jumps to the 1/60 path, which needs only memory (r9/r10/r11 are set there).
+[[entrypoint.midasm_hook]]
+address = 0x824178CC
+name = "Wwe60fpsEntrances"
+jump_address_on_true = 0x82417910
+
+# 60 fps entrances, crowd (ticket 02; docs/research/60fps-entrances.md §8). The crowd
+# scheduler 0x82B55A38 (r30 = this, f31 = dt, r28 = 0 from 0x82B55A5C) tests dt at
+# 0x82B55A90: lis r11,-0x7ddf / lfs f0,0x7768(r11) ([0x82217768] = 0x3D088886, 1/30) /
+# fcmpu cr6,f31,f0 / blt 0x82B55B98. Under 1/30 s it ticks one crowd group per tick
+# (round robin, +0xA0) with dt x2 at +0xA4; at 1/30 s and over, 0x82B55AA0 sets bit
+# 0x1000 of +0x380 on every crowd mesh and +0xA4 = dt, so all of them tick. Reached by
+# fall-through from 0x82B55A8C and beq cr6 at 0x82B55A64 and 0x82B55A7C. True jumps to
+# 0x82B55AA0, which needs r30, r28 and f31, all set before the site.
+[[entrypoint.midasm_hook]]
+address = 0x82B55A90
+name = "Wwe60fpsCrowd"
+jump_address_on_true = 0x82B55AA0
