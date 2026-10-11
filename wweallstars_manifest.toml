@@ -465,3 +465,24 @@ jump_address_on_true = 0x82417910
 address = 0x82B55A90
 name = "Wwe60fpsCrowd"
 jump_address_on_true = 0x82B55AA0
+
+# Unlock everything (.scratch/unlock-everything/ ticket 01; docs/research/unlock-everything.md
+# §2, §4.1). The unlockables refresh 0x82BE7560 (r3 = manager [0x8374C164]) saves r3 at
+# 0x82BE7570 (mr r31,r3) and then calls 0x82BE6710 and the five list refreshers
+# 0x82BE6CA8-0x82BE70C8, which set every item's unlocked bit (0x80000000 at item+0x18)
+# when bit 0x80000000 of [r3+0x34] is set, the bit the UnlockAll cheat sets. The hook
+# sets that bit first. Void.
+[[entrypoint.midasm_hook]]
+address = 0x82BE7570
+name = "WweUnlockEverything"
+registers = ["r3"]
+
+# Unlock everything, Fantasy Warfare (same ticket; research §2.5). The FW menu builder
+# keeps the match count in r23 (mr r23,r3 at 0x82B9C6EC) and reads the progress at
+# 0x82B9C724 (addi r3,r11,40 / bl 0x82BDAD28 on [0x83744F48]+0x28); 0x82B9C728 (lis
+# r11,-0x7dde) is the first instruction after it, and mr r19,r3 at 0x82B9C72C keeps the
+# result. The hook raises r3 to r23, so every match is open; the counter is not written.
+[[entrypoint.midasm_hook]]
+address = 0x82B9C728
+name = "WweUnlockFantasyWarfare"
+registers = ["r3", "r23"]

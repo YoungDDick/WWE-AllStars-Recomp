@@ -13,7 +13,8 @@ public sealed class SettingsSchemaTests
         Assert.Equal(
             ["fullscreen", "vulkan_device", "user_language", "graphics_preset", "wwe_native_renderer",
              "wwe_native_supersample",
-             "wwe_native_resolution_scale", "wwe_native_anisotropy", "wwe_native_color_mode", "wwe_60fps_entrances", "wwe_online",
+             "wwe_native_resolution_scale", "wwe_native_anisotropy", "wwe_native_color_mode", "wwe_60fps_entrances", "wwe_unlock_everything",
+             "wwe_online",
              "wwe_online_name",
              "wwe_online_server", "wwe_online_upnp"],
             schema.Startup.Select(s => s.Key));

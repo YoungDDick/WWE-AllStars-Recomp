@@ -41,6 +41,12 @@ REXCVAR_DEFINE_INT32(wwe_native_anisotropy, 3, "WWEAllStars",
 REXCVAR_DEFINE_BOOL(wwe_60fps_entrances, true, "WWEAllStars",
                     "Run entrances and the arena intro at 60 fps instead of the original 30 "
                     "(an Enhancement)");
+// Asked at each unlockables refresh (unlock_everything.cpp); the game only ever sets
+// its unlock-all flag, so turning this off takes a restart.
+REXCVAR_DEFINE_BOOL(wwe_unlock_everything, false, "WWEAllStars",
+                    "Unlock every wrestler, arena, attire, Create a Superstar move, entrance "
+                    "and Fantasy Warfare match; progress earned while it is on is still saved")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 // Asked on every pad request and every hit, so a change applies at once.
 REXCVAR_DEFINE_INT32(wwe_vibration_mode, 2, "WWEAllStars",
                      "Pad vibration: 0 = Off, 1 = Original (the Xbox 360's aerial hit pulse "

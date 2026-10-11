@@ -133,6 +133,12 @@ inline std::vector<Setting> PlayerSettings() {
       {"wwe_vibration_strength", "Vibration strength", "CONTROLS",
        {{"0", "0 %"}, {"25", "25 %"}, {"50", "50 %"}, {"75", "75 %"}, {"100", "100 %"}},
        "Scales every rumble, in every vibration mode. Lower it for a gentler pad."},
+      {"wwe_unlock_everything", "Unlock everything", "GAMEPLAY",
+       {{"false", "Off"}, {"true", "On"}},
+       "Unlocks every wrestler, arena, attire, Create a Superstar move, entrance and Fantasy "
+       "Warfare match. Progress you earn while it is on is still saved; turn it off to see "
+       "only what you have unlocked yourself.",
+       /*startup=*/true},
       // The SDK's online client (patches/rexglue-online.patch) reads these when
       // the game first asks for Xbox LIVE, so a change applies at the next start.
       // The developer switches (forced relay, dropped direct traffic, the bind

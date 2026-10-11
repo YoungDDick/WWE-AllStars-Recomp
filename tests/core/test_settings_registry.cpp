@@ -25,20 +25,20 @@ double AsNumber(const std::string& value) {
 
 }  // namespace
 
-TEST_CASE("the page shows the spec's settings on five tabs") {
+TEST_CASE("the page shows the spec's settings on six tabs") {
   std::set<std::string> names;
   std::set<std::string> tabs;
   for (const Setting& setting : PlayerSettings()) {
     names.insert(setting.name);
     tabs.insert(setting.tab);
   }
-  CHECK(tabs == std::set<std::string>{"DISPLAY", "GRAPHICS", "AUDIO", "CONTROLS", "ONLINE"});
+  CHECK(tabs == std::set<std::string>{"DISPLAY", "GRAPHICS", "AUDIO", "CONTROLS", "GAMEPLAY", "ONLINE"});
   CHECK(names == std::set<std::string>{
                      "fullscreen", "present_vsync", "vblank_follows_display",
                      "wwe_native_renderer", "wwe_native_supersample", "wwe_native_cas",
                      "wwe_native_resolution_scale", "wwe_native_anisotropy",
                      "wwe_native_color_mode", "wwe_60fps_entrances", "audio_mute",
-                     "wwe_vibration_mode", "wwe_vibration_strength", "vulkan_device",
+                     "wwe_vibration_mode", "wwe_vibration_strength", "wwe_unlock_everything", "vulkan_device",
                      "user_language", "graphics_preset", "wwe_online", "wwe_online_name", "wwe_online_server",
                      "wwe_online_upnp"});
 }

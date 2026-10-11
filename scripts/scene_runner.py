@@ -55,7 +55,8 @@ EXE = ROOT / "out/build/win-amd64-relwithdebinfo-vulkan/wweallstars.exe"
 # turns them off; a new enhancement is added here and to the native session report.
 ENHANCEMENTS = {"wwe_native_supersample": "false", "wwe_native_cas": "0",
                 "wwe_vibration_mode": "1", "wwe_native_color_mode": "0",
-                "wwe_60fps_entrances": "false"}
+                "wwe_60fps_entrances": "false",
+                "wwe_unlock_everything": "false"}
 
 # Runtime flags every run gets: every enhancement off, full vibration strength (a player setting,
 # not an enhancement), presents without vsync and the guest vblank on the host clock, as when the

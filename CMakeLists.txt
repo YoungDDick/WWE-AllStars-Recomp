@@ -36,6 +36,7 @@ set(WWEALLSTARS_SOURCES
     src/gpu_wait.cpp
     src/resolve_watch.cpp
     src/online_trace_hooks.cpp
+    src/unlock_everything.cpp
     src/script_input.cpp
     src/vibration/enhanced_hooks.cpp
     src/vibration/mode.cpp
