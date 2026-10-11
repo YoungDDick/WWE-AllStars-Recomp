@@ -92,6 +92,18 @@ every hit a pulse sized by the kind of move, plus finishers landing on you, slam
 mat, your own hits connecting, reversals and critical health. Original keeps the console's
 behaviour, and a strength setting scales both.
 
+### 60 fps entrances
+
+On the console, wrestler entrances and the arena intro run at 30 fps. The PC version
+plays them at 60, crowd included. On by default; the GRAPHICS tab turns it off.
+
+### Unlock everything
+
+An option on the GAMEPLAY tab opens every wrestler, arena, attire, Create a Superstar
+move, entrance and Fantasy Warfare match at once. Your save is never changed by it:
+what you really earn while it is on is still saved, and turning it off (then
+restarting) brings back your own progress.
+
 ### Online Player Match (experimental)
 
 <img src="docs/images/shot-online-lobby.jpg" alt="The Xbox LIVE Player Match lobby" width="50%" align="right">
