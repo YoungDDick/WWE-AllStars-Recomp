@@ -37,7 +37,8 @@ TEST_CASE("the page shows the spec's settings on six tabs") {
                      "fullscreen", "present_vsync", "vblank_follows_display",
                      "wwe_native_renderer", "wwe_native_supersample", "wwe_native_cas",
                      "wwe_native_resolution_scale", "wwe_native_anisotropy",
-                     "wwe_native_color_mode", "wwe_60fps_entrances", "audio_mute",
+                     "wwe_native_color_mode", "wwe_60fps_entrances", "wwe_120fps_matches",
+                     "audio_mute",
                      "wwe_vibration_mode", "wwe_vibration_strength", "wwe_unlock_everything", "vulkan_device",
                      "user_language", "graphics_preset", "wwe_online", "wwe_online_name", "wwe_online_server",
                      "wwe_online_upnp"});
@@ -128,7 +129,8 @@ TEST_CASE("restart marks come from each cvar's lifecycle") {
     if (setting.name == "audio_mute" || setting.name == "fullscreen" ||
         setting.name == "wwe_vibration_mode" || setting.name == "wwe_vibration_strength" ||
         setting.name == "wwe_native_cas" || setting.name == "present_vsync" ||
-        setting.name == "wwe_native_anisotropy" || setting.name == "wwe_60fps_entrances") {
+        setting.name == "wwe_native_anisotropy" || setting.name == "wwe_60fps_entrances" ||
+        setting.name == "wwe_120fps_matches") {
       CHECK_FALSE(setting.restart);
     } else if (!InGpuPlugin(setting.name)) {
       CHECK(setting.restart);

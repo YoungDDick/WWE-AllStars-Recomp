@@ -7,7 +7,9 @@ using rex::graphics::VblankSource;
 
 namespace {
 // Played, fixed refresh: the case the rule exists for.
-auto Played(double hz) { return ChooseVblankSource(hz, /*variable_refresh=*/false, /*allowed=*/true); }
+auto Played(double hz, double guest_hz = 60.0) {
+  return ChooseVblankSource(hz, /*variable_refresh=*/false, /*allowed=*/true, guest_hz);
+}
 }  // namespace
 
 TEST_CASE("a display at a multiple of 60 Hz drives the guest vblank") {
@@ -29,6 +31,17 @@ TEST_CASE("rates that are not near a multiple of 60 Hz keep the host clock") {
   for (double hz : {144.0, 165.0, 75.0, 100.0, 50.0}) {
     CHECK(Played(hz).source == VblankSource::kHostClock);
   }
+}
+
+TEST_CASE("a 120 Hz guest locks to the display at its own rate") {
+  for (auto [hz, every] : {std::pair{120.0, 1u}, {240.0, 2u}, {360.0, 3u}, {119.88, 1u}}) {
+    const auto d = Played(hz, /*guest_hz=*/120.0);
+    CHECK(d.source == VblankSource::kDisplay);
+    CHECK(d.display_per_guest == every);
+  }
+  // A 60 Hz display cannot show a 120 Hz guest; 144 Hz is not a multiple.
+  CHECK(Played(60.0, 120.0).source == VblankSource::kHostClock);
+  CHECK(Played(144.0, 120.0).source == VblankSource::kHostClock);
 }
 
 TEST_CASE("variable refresh keeps the host clock: the display follows the frames") {

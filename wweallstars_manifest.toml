@@ -466,6 +466,77 @@ address = 0x82B55A90
 name = "Wwe60fpsCrowd"
 jump_address_on_true = 0x82B55AA0
 
+# 120 fps matches, E0 (.scratch/high-framerate/, ticket 02; docs/research/high-framerate.md
+# §1.1, §6 a). FEngineLoop::Tick 0x82417780 joins its two step paths at 0x82417930
+# (b 0x82417930 at 0x8241790C after lfs f31,0x2f38 = 1/30; fall-through from 0x8241792C
+# after lfs f31,0x1ccc = 1/60). f31 holds the step there and is next stored to +0x28 and
+# multiplied by the dilation for GEngine->Tick and the limiter. Void: the hook may halve f31.
+[[entrypoint.midasm_hook]]
+address = 0x82417930
+name = "Wwe120Tick"
+registers = ["f31"]
+
+# 120 fps matches, per-tick fixes (.scratch/high-framerate/ ticket 04;
+# docs/research/high-framerate.md §11.3). The wrestler's movement tick 0x82AE2138 has dt in
+# f24 (fmr f24,f1 at 0x82AE2158), 1.0 in f21 (lfs f21,[0x82001CC8] at 0x82AE21F8) and 60.0 in
+# f23 ([0x8206B200] at 0x82AE2254). Its ease-in ramp: fsubs f9,f10,f21 at 0x82AE228C (frames
+# left − 1, the ramp's previous point; next used by fmuls f8,f9,f25 at 0x82AE2290), fsubs
+# f11,f13,f21 at 0x82AE233C then stfs f11,0x1CEC(r30) at 0x82AE2340 (the countdown), and
+# fnmsubs f10,f0,f23,f31 at 0x82AE2344 (g − g·dt·60; f31 = g from fmr f31,f1 at 0x82AE2320)
+# then fadds f9,f10,f12 at 0x82AE2348.
+# Void hooks; each may rewrite the register before its use.
+[[entrypoint.midasm_hook]]
+address = 0x82AE2290
+name = "Wwe120RampPrevious"
+registers = ["f9", "f10"]
+
+[[entrypoint.midasm_hook]]
+address = 0x82AE2340
+name = "Wwe120RampCountdown"
+registers = ["f11", "f13"]
+
+[[entrypoint.midasm_hook]]
+address = 0x82AE2348
+name = "Wwe120RampGravity"
+registers = ["f10", "f31"]
+
+# 120 fps matches, animation frame counter (ticket 04): 0x82540E30 keeps dt in f27 (fmr
+# f27,f1 at 0x82540E4C) and 1.0 in f26 (0x82541004). For the pawn's current animation it
+# adds one frame per tick to pawn +0x1D00: lfs f0,0x1D00(r24) / fadds f13,f0,f26 at
+# 0x82541064-0x82541068, then stfs f13,0x1D00(r24) at 0x8254106C. Void: may rewrite f13.
+[[entrypoint.midasm_hook]]
+address = 0x8254106C
+name = "Wwe120AnimFrames"
+registers = ["f0", "f13"]
+
+# 120 fps matches, motion locator window (ticket 07). The anim node tick 0x82540E30 samples the
+# "position_locator" bone's track twice with 0x8279BAF8 and moves the pawn by the difference
+# (0x8253F9A8 -> node+0x164, LocalAtoms in 0x82540098, then 0x8250B510 -> pawn+0x4A4): lfs
+# f1,0xC4(r31) at 0x825416C0 then bl at 0x825416C8 (time A = CurrentTime); lfs f0,0(r28) (the
+# step, node+0x180) at 0x825416CC, lfs f13,0xC4(r31) at 0x825416D0, fadds f1,f0,f13 at 0x825416E8
+# then bl at 0x825416EC (time B = CurrentTime + step). Void: each may rewrite f1 before its call.
+[[entrypoint.midasm_hook]]
+address = 0x825416C8
+name = "Wwe120LocatorFrom"
+registers = ["f1", "r28"]
+
+[[entrypoint.midasm_hook]]
+address = 0x825416EC
+name = "Wwe120LocatorTo"
+registers = ["f1", "r28"]
+
+# 120 fps matches, bone anchor events (ticket 08). The notify walker 0x82544430 tests each
+# timeline statement in order: r30 = the statement (lwzx r30,r9,r10 at 0x825444BC; vtable at +0),
+# f1 = its frame F (vtable+0x18), fadds f0,f31,f27 at 0x825444D4 (threshold = time·60 +
+# rate·0.5; f31 = time·60 from fmuls at 0x825444A0, f27 = rate·0.5 from 0x8254449C), then
+# fcmpu cr6,f1,f0 at 0x825444DC and bgt out at 0x825444E0. The bone anchor statements (vtables
+# 0x82080388, Execute 0x82597240 "Name of bone to anchor to"; 0x820801D0, Execute 0x82597168)
+# set pawn+0x230/+0x24C. Void: may rewrite f0 before the compare.
+[[entrypoint.midasm_hook]]
+address = 0x825444DC
+name = "Wwe120AnchorLookAhead"
+registers = ["f0", "f27", "f31", "r30"]
+
 # Unlock everything (.scratch/unlock-everything/ ticket 01; docs/research/unlock-everything.md
 # §2, §4.1). The unlockables refresh 0x82BE7560 (r3 = manager [0x8374C164]) saves r3 at
 # 0x82BE7570 (mr r31,r3) and then calls 0x82BE6710 and the five list refreshers

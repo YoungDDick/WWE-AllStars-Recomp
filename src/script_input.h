@@ -62,8 +62,11 @@ class ScriptInputDriver final : public rex::input::InputDriver {
   using FrameSource = std::function<uint64_t()>;
 
   static constexpr auto kDevice = static_cast<rex::input::DeviceId>(0x53435254);  // 'SCRT'
+  // Player 2's pad (--wwe_input_script_p2), from its own command file.
+  static constexpr auto kDevice2 = static_cast<rex::input::DeviceId>(0x53435232);  // 'SCR2'
 
-  ScriptInputDriver(std::filesystem::path command_file, Clock clock, FrameSource frames);
+  ScriptInputDriver(std::filesystem::path command_file, Clock clock, FrameSource frames,
+                    rex::input::DeviceId id = kDevice);
 
   static std::chrono::milliseconds SteadyClock();
 
@@ -101,6 +104,7 @@ class ScriptInputDriver final : public rex::input::InputDriver {
   Step CurrentStep(uint32_t* packet);
 
   std::filesystem::path file_;
+  rex::input::DeviceId id_;
   Clock clock_;
   FrameSource frames_;
   size_t consumed_ = 0;  // bytes of the file already parsed

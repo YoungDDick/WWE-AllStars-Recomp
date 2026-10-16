@@ -104,6 +104,13 @@ move, entrance and Fantasy Warfare match at once. Your save is never changed by 
 what you really earn while it is on is still saved, and turning it off (then
 restarting) brings back your own progress.
 
+### 120 fps matches (experimental)
+
+An option on the GRAPHICS tab runs offline matches at 120 fps, on a 120 Hz or faster
+display or with variable refresh. Menus and entrances keep their rates, and online
+matches stay at 60. It is off by default: some moves can still look wrong at 120, such as
+a wrestler briefly out of place on a running throw, and it needs a strong GPU.
+
 ### Online Player Match (experimental)
 
 <img src="docs/images/shot-online-lobby.jpg" alt="The Xbox LIVE Player Match lobby" width="50%" align="right">

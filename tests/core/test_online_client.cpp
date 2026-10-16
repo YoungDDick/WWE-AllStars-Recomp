@@ -34,17 +34,17 @@ TEST_CASE("a new identity has an online XUID and a locally administered MAC", "[
 TEST_CASE("the first online start writes the identity and later starts read it", "[online]") {
   const auto folder = TempFolder("survives");
   std::mt19937_64 first_random(1), second_random(2);
-  const auto first = live::LoadOrCreateIdentity(folder, first_random);
+  const auto first = live::LoadOrCreateIdentity(folder, first_random, "pc-a");
   CHECK(std::filesystem::exists(folder / "online-identity.json"));
-  const auto again = live::LoadOrCreateIdentity(folder, second_random);
+  const auto again = live::LoadOrCreateIdentity(folder, second_random, "pc-a");
   CHECK(again.xuid == first.xuid);
   CHECK(again.mac == first.mac);
 }
 
 TEST_CASE("another user data folder gets another identity", "[online]") {
   std::mt19937_64 random(3);
-  const auto a = live::LoadOrCreateIdentity(TempFolder("a"), random);
-  const auto b = live::LoadOrCreateIdentity(TempFolder("b"), random);
+  const auto a = live::LoadOrCreateIdentity(TempFolder("a"), random, "pc-a");
+  const auto b = live::LoadOrCreateIdentity(TempFolder("b"), random, "pc-a");
   CHECK(a.xuid != b.xuid);
   CHECK(a.mac != b.mac);
 }
@@ -53,10 +53,46 @@ TEST_CASE("an unreadable identity file is replaced", "[online]") {
   const auto folder = TempFolder("broken");
   std::ofstream(folder / "online-identity.json") << "{ not json";
   std::mt19937_64 random(4);
-  const auto identity = live::LoadOrCreateIdentity(folder, random);
+  const auto identity = live::LoadOrCreateIdentity(folder, random, "pc-a");
   CHECK((identity.xuid >> 48) == 0x0009);
   std::mt19937_64 other(5);
-  CHECK(live::LoadOrCreateIdentity(folder, other).xuid == identity.xuid);
+  CHECK(live::LoadOrCreateIdentity(folder, other, "pc-a").xuid == identity.xuid);
+}
+
+TEST_CASE("an identity file copied to another machine is replaced there", "[online]") {
+  // Issue #2: a game folder copied to a friend's PC took its online-identity.json along, both
+  // PCs signed in with one XUID, and each one's search hid the other's sessions as its own.
+  const auto folder = TempFolder("copied");
+  std::mt19937_64 first(6), second(7), third(8);
+  const auto original = live::LoadOrCreateIdentity(folder, first, "pc-a");
+  const auto copy = live::LoadOrCreateIdentity(folder, second, "pc-b");
+  CHECK(copy.xuid != original.xuid);
+  CHECK(copy.mac != original.mac);
+  CHECK(live::LoadOrCreateIdentity(folder, third, "pc-b").xuid == copy.xuid);
+}
+
+TEST_CASE("an identity file without a machine is replaced once", "[online]") {
+  // 1.1.0 wrote no machine, so a copy can't be told from the original: each gets a new one.
+  const auto folder = TempFolder("unbound");
+  std::ofstream(folder / "online-identity.json")
+      << R"({"xuid": "0009BABBF8F47714", "mac": "02aabbcc0a01"})";
+  std::mt19937_64 first(9), second(10);
+  const auto identity = live::LoadOrCreateIdentity(folder, first, "pc-a");
+  CHECK(identity.xuid != 0x0009BABBF8F47714ull);
+  CHECK(live::LoadOrCreateIdentity(folder, second, "pc-a").xuid == identity.xuid);
+}
+
+TEST_CASE("without a machine key the identity file is kept", "[online]") {
+  const auto folder = TempFolder("no-machine");
+  std::mt19937_64 first(11), second(12);
+  const auto identity = live::LoadOrCreateIdentity(folder, first, "pc-a");
+  CHECK(live::LoadOrCreateIdentity(folder, second, "").xuid == identity.xuid);
+}
+
+TEST_CASE("this machine has a stable machine key", "[online]") {
+  const auto key = live::MachineKey();
+  CHECK_FALSE(key.empty());
+  CHECK(live::MachineKey() == key);
 }
 
 TEST_CASE("the server setting becomes the API base URL", "[online]") {

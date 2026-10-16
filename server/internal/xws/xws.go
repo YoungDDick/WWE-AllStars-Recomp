@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Settings configures the API.
@@ -33,6 +34,8 @@ type Settings struct {
 	// ("tu2": the 1.0.0 port, built on Title Update 2). Others get 426 and UpdateMessage.
 	// Empty takes every client.
 	RequiredGameVersion string
+	// Now, when set, is the clock sessions age by (tests).
+	Now func() time.Time
 }
 
 // UpdateMessage is what a client of another game version is told.
@@ -43,8 +46,8 @@ func UpdateMessage(required string) string {
 
 // Player is a registered player, as the client sends it.
 type Player struct {
-	XUID        string `json:"xuid"`
-	BuildID     string `json:"buildId,omitempty"`
+	XUID    string `json:"xuid"`
+	BuildID string `json:"buildId,omitempty"`
 	// GameVersion is the game the port is built on ("tu2"); 0.9.0 (the base game) sends none.
 	GameVersion string `json:"gameVersion,omitempty"`
 	MachineID   string `json:"machineId"`
@@ -80,6 +83,9 @@ type Server struct {
 func New(settings Settings) *Server {
 	if settings.Logf == nil {
 		settings.Logf = func(string, ...any) {}
+	}
+	if settings.Now == nil {
+		settings.Now = time.Now
 	}
 	s := &Server{settings: settings, mux: http.NewServeMux(), players: map[string]Player{},
 		tokens: map[string]relayGrant{}, sessions: map[string]*session{}}
@@ -184,6 +190,7 @@ func (s *Server) registerPlayer(w http.ResponseWriter, r *http.Request) {
 	rand.Read(token[:])
 	from, _ := netip.ParseAddr(s.clientIP(r))
 	s.mu.Lock()
+	s.dropHostedBy(player.XUID)
 	s.players[player.XUID] = player
 	s.tokens[player.XUID] = relayGrant{token: token, from: from.Unmap()}
 	s.mu.Unlock()
@@ -227,7 +234,7 @@ func (s *Server) RelayToken(xuid uint64) ([16]byte, netip.Addr, bool) {
 
 // MayRelay says whether two players may reach each other through the relay: both joined
 // one session, or one hosts a session the other found in a search (the game reaches the
-// host before it joins). relay.Directory.
+// host before it joins). Relayed traffic keeps the session alive. relay.Directory.
 func (s *Server) MayRelay(a, b uint64) bool {
 	ka, kb := xuidKey(a), xuidKey(b)
 	s.mu.Lock()
@@ -237,6 +244,7 @@ func (s *Server) MayRelay(a, b uint64) bool {
 		_, hasB := sess.members[kb]
 		host := strings.ToUpper(sess.XUID)
 		if (hasA && hasB) || (host == ka && sess.searchers[kb]) || (host == kb && sess.searchers[ka]) {
+			sess.active = s.settings.Now()
 			return true
 		}
 	}

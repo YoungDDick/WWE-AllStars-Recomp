@@ -41,6 +41,10 @@ REXCVAR_DEFINE_INT32(wwe_native_anisotropy, 3, "WWEAllStars",
 REXCVAR_DEFINE_BOOL(wwe_60fps_entrances, true, "WWEAllStars",
                     "Run entrances and the arena intro at 60 fps instead of the original 30 "
                     "(an Enhancement)");
+// Asked at every engine tick's step choice (game_tick_log.cpp), so a change applies at once.
+REXCVAR_DEFINE_BOOL(wwe_120fps_matches, false, "WWEAllStars",
+                    "Run offline matches at 120 fps instead of 60; menus and entrances keep "
+                    "their rates, and online matches stay at 60 (an Enhancement)");
 // Asked at each unlockables refresh (unlock_everything.cpp); the game only ever sets
 // its unlock-all flag, so turning this off takes a restart.
 REXCVAR_DEFINE_BOOL(wwe_unlock_everything, false, "WWEAllStars",

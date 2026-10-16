@@ -14,6 +14,11 @@
 // Two midasm hooks make 60 fps entrances (wwe_60fps_entrances): the tick's step choice
 // steps flagged cinematics at 1/60 s instead of 1/30 s, and the crowd scheduler then
 // ticks the whole crowd every tick.
+//
+// 120 fps matches (wwe_120fps_matches): a midasm hook at the step join halves the step in a
+// match, the guest vblank follows the tick rate (60 or 120 Hz) so each present is a new
+// frame, and hooks in the camera, the movement tick and the anim player keep what the game
+// counts per tick at its 60 fps timing (docs/research/high-framerate.md §12).
 
 #include "generated/default/wweallstars_pch.h"
 
@@ -26,8 +31,10 @@
 #include <rex/cvar.h>
 #include <rex/hook.h>
 #include <rex/logging.h>
+#include <rex/runtime.h>
 #include <rex/thread.h>
 
+#include "game_tick_log.h"
 #include "spin_waits.h"
 
 REXCVAR_DEFINE_BOOL(wwe_tick_log, false, "WWEAllStars",
@@ -36,7 +43,14 @@ REXCVAR_DEFINE_BOOL(wwe_limiter_sleep, true, "WWEAllStars",
                     "Let the game thread's frame waits (the 60 Hz limiter and the wait on the "
                     "render thread) sleep instead of spinning a host core (false: the game's "
                     "own appSleep(0) yield loops, for comparisons)");
+REXCVAR_DEFINE_INT32(wwe_120fps_fixes, 111, "WWEAllStars",
+                     "120 fps matches: which per-tick fixes run while the step is 1/120 s (a "
+                     "bitmask, for comparisons): 1 match camera averaging, 2 jump ease-in ramp, "
+                     "4 jump ramp gravity term, 8 animation frame counter, 32 motion locator window "
+                     "(ticket 07), 64 bone "
+                     "anchor events (ticket 08)");
 REXCVAR_DECLARE(bool, wwe_60fps_entrances);  // settings_cvars.cpp
+REXCVAR_DECLARE(bool, wwe_120fps_matches);   // settings_cvars.cpp
 
 namespace {
 
@@ -67,6 +81,30 @@ constexpr double kSlowTickMs = 20.0;
 
 thread_local bool t_in_tick = false;
 thread_local uint32_t t_self = 0;  // the FEngineLoop whose tick runs
+// The game thread's current tick steps 1/120 s (Wwe120Tick halved it), and how many ticks
+// have run: the per-tick fixes below read both from inside GEngine->Tick.
+thread_local bool t_step_halved = false;
+thread_local uint64_t t_tick_count = 0;
+// How often each per-tick fix changed a value this second (wwe_tick_log), by bit.
+thread_local uint32_t t_fix_counts[7] = {};
+
+rex::Runtime* g_runtime = nullptr;
+// The guest vblank rate last asked for: 120 while ticks run at 120/s, else 0 (the video
+// mode's), so presents follow new frames and an FPS counter reads the game's real rate.
+double g_vblank_rate = 0.0;
+
+void FollowTickRate(bool ticks_120) {
+  const double want = ticks_120 ? 120.0 : 0.0;
+  if (want == g_vblank_rate) {
+    return;
+  }
+  auto* graphics = g_runtime ? g_runtime->graphics_system() : nullptr;
+  if (!graphics) {
+    return;
+  }
+  g_vblank_rate = want;
+  graphics->SetGuestVblankRate(want);
+}
 // Time in appSleep during the tick: the limiter's, the render-thread wait's, any other call's.
 struct Waits {
   uint64_t limiter_ns = 0, render_ns = 0, other_ns = 0;
@@ -141,6 +179,15 @@ void Record(const uint8_t* base, uint32_t self, Clock::duration total, const Wai
   s.dilation_min = std::min(s.dilation_min, dilation);
   s.dilation_max = std::max(s.dilation_max, dilation);
   if (now - s.start >= std::chrono::seconds(1)) {
+    if (t_fix_counts[0] | t_fix_counts[1] | t_fix_counts[2] | t_fix_counts[3] |
+        t_fix_counts[5] | t_fix_counts[6]) {
+      REXLOG_INFO(
+          "120 fps fixes 1s: camera {}, ramp {}, ramp gravity {}, anim frames {}, locator {}, "
+          "anchors {}",
+          t_fix_counts[0], t_fix_counts[1], t_fix_counts[2], t_fix_counts[3], t_fix_counts[5],
+          t_fix_counts[6]);
+      std::memset(t_fix_counts, 0, sizeof(t_fix_counts));
+    }
     REXLOG_INFO("game tick 1s: {} ticks ({} at 1/30 s, {} other steps, {} cinematic at "
                 "1/60 s), work mean {:.2f} ms max {:.1f} ms, tick max {:.1f} ms, dilation "
                 "{:.3f}..{:.3f}",
@@ -161,10 +208,13 @@ REX_HOOK_RAW(sub_82417780) {
   const auto start = Clock::now();
   t_in_tick = true;
   t_self = self;
+  t_step_halved = false;
+  ++t_tick_count;
   t_waits = {};
   const bool at_60 = REXCVAR_GET(wwe_60fps_entrances) && LoadU32(base, kHalfRateFlag) != 0;
   __imp__sub_82417780(ctx, base);
   t_in_tick = false;
+  FollowTickRate(t_step_halved);
   if (REXCVAR_GET(wwe_tick_log)) {
     Record(base, self, Clock::now() - start, t_waits, at_60);
   }
@@ -251,3 +301,246 @@ bool Wwe60fpsEntrances() {
 // takes the scheduler's own path for steps of 1/30 s and over (0x82B55AA0): every crowd
 // group ticks every tick with the real step, as all of them do in the 30 Hz original.
 bool Wwe60fpsCrowd() { return InSixtyFpsCinematic(); }
+
+namespace {
+
+// A match is being played: the match's pawn manager (0x837450D0, set up once bit 0 of
+// [0x8374523C] is set; docs/research/high-framerate.md §11) has entries. They are ring objects,
+// not the wrestlers (ticket 07), but the list is empty in the menus (whose 3D arena backdrop
+// runs the crowd too) and through the entrances, and fills about 3 s after them (ticket 03
+// runs: 0 in menus, 4 in a 1v1).
+constexpr uint32_t kPawnManagerReady = 0x8374523C;
+constexpr uint32_t kPawnManagerCount = 0x837450D0 + 0x40;
+bool InMatch() {
+  const uint8_t* base = REX_KERNEL_MEMORY()->virtual_membase();
+  const uint32_t count = LoadU32(base, kPawnManagerCount);
+  return (LoadU32(base, kPawnManagerReady) & 1) != 0 && count > 0 && count <= 16;
+}
+
+// A Net-Z session runs: the tick's own test before the session tick (lwz r11,0x590 of
+// 0x83740000 at 0x82417CD4; 0x82410498 only returns the session singleton). SyncSim counts
+// engine ticks (research §5), so an online match keeps 1/60. Being signed in (wwe_online)
+// is not enough reason: offline matches then still run at 120.
+constexpr uint32_t kNetZSessionActive = 0x83740590;
+
+bool At120Allowed() {
+  if (!InMatch()) {
+    return false;
+  }
+  const uint8_t* base = REX_KERNEL_MEMORY()->virtual_membase();
+  return LoadU32(base, kNetZSessionActive) == 0 && LoadU32(base, kHalfRateFlag) == 0 &&
+         LoadU32(base, kBenchmarkFlag) == 0 && LoadU32(base, kDumpMovieFlag) == 0;
+}
+
+}  // namespace
+
+// 120 fps matches (.scratch/high-framerate/spec.md; docs/research/high-framerate.md §1.1,
+// §6 a): both step paths join at 0x82417930 with the step in f31, before the tick stores it
+// (+0x28), passes dilation * step to GEngine->Tick and waits that long in its limiter. Halving
+// f31 there gives 1/120 s ticks and leaves the game's own time dilation (+0x2C) alone: the game
+// writes it itself (1.0 at match start, 0.4 in slow motion; ticket 02). Only in a match: 1/30 s
+// cinematics (entrances, replays) keep their step, and online play keeps 1/60 (SyncSim counts
+// ticks, §5).
+void Wwe120Tick(PPCRegister& f31) {
+  if (REXCVAR_GET(wwe_120fps_matches) && At120Allowed()) {
+    f31.f64 *= 0.5;
+    t_step_halved = true;
+  }
+}
+
+// Per-tick fixes for 1/120 s steps (ticket 04; docs/research/high-framerate.md §11.3, §12).
+// Each one restores what a 1/60 s tick does, and only runs while this tick's step was
+// halved, so 60 fps play is untouched. wwe_120fps_fixes switches them one by one for
+// comparisons. The game counts these in ticks, not in game time: at 1/60 s each tick adds a
+// whole frame even in slow motion (dt carries the dilation), so a halved tick adds half.
+namespace {
+
+bool Fix120On(int32_t bit) {
+  return t_step_halved && (REXCVAR_GET(wwe_120fps_fixes) & bit) != 0;
+}
+
+void CountFix120(int32_t bit) { ++t_fix_counts[std::countr_zero(uint32_t(bit))]; }
+
+bool Fix120(int32_t bit) {
+  if (!Fix120On(bit)) {
+    return false;
+  }
+  CountFix120(bit);
+  return true;
+}
+
+constexpr double kHalfFrame = 0.5;
+
+}  // namespace
+
+// Jump ease-in ramp, previous step (0x82AE2138; bit 2): the ramp adds sin(n·a) − sin((n−1)·a)
+// to the launch velocity each tick, with n the frames left (+0x1CEC) and 1.0 in f21
+// (fsubs f9,f10,f21 at 0x82AE228C). A halved tick moves n by half a frame, so the previous
+// point is n − 0.5 and the increments still add up to the whole velocity.
+void Wwe120RampPrevious(PPCRegister& f9, PPCRegister& f10) {
+  if (Fix120(2)) {
+    f9.f64 = double(float(f10.f64 - kHalfFrame));
+  }
+}
+
+// Jump ease-in ramp, countdown (bit 2): +0x1CEC −= 1.0 per tick (fsubs f11,f13,f21 at
+// 0x82AE233C); a halved tick counts down half a frame, so the ramp lasts as long as at 60.
+void Wwe120RampCountdown(PPCRegister& f11, PPCRegister& f13) {
+  if (Fix120(2)) {
+    f11.f64 = double(float(f13.f64 - kHalfFrame));
+  }
+}
+
+// Jump ramp gravity term (bit 4): vel.z += g − g·dt·60 (fnmsubs f10,f0,f23,f31 at 0x82AE2344,
+// f31 = g) adds g·(1 − d) per 1/60 s tick at dilation d (0 at full speed). A halved tick
+// computes g − g·d/2; it should add half the 60 fps amount, g·(1 − d)/2, which is f10 − g/2.
+void Wwe120RampGravity(PPCRegister& f10, PPCRegister& f31) {
+  if (Fix120(4)) {
+    f10.f64 = double(float(f10.f64 - f31.f64 * kHalfFrame));
+  }
+}
+
+// Animation frame counter (bit 8): pawn +0x1D00 adds 1.0 per tick for the current animation
+// (fadds f13,f0,f26 at 0x82541068), and the anim FSM compares it with authored 60 Hz frame
+// numbers; a halved tick adds half a frame, so frame windows keep their length.
+void Wwe120AnimFrames(PPCRegister& f0, PPCRegister& f13) {
+  if (Fix120(8)) {
+    f13.f64 = double(float(f0.f64 + kHalfFrame));
+  }
+}
+
+// Motion locator window (bit 32, ticket 07): the anim node tick moves the pawn by the
+// "position_locator" bone's track sampled over [t, t + step] (0x825416C8, 0x825416EC; t already
+// advanced). The clips are keyed for a lead of one 60 Hz frame, which is one step at 1/60 s. At
+// 1/120 s one step is half that, so a climb's lift landed a tick after the pose that compensates
+// for it and the body sank into the turnbuckle for two ticks. A halved tick samples
+// [t + step, t + 2·step] instead: the same one-frame lead; at 1/60 s nothing changes.
+namespace {
+void ShiftLocatorTime(PPCRegister& f1, PPCRegister& r28) {
+  if (Fix120(32)) {
+    const float step = LoadF32(REX_KERNEL_MEMORY()->virtual_membase(), r28.u32);
+    f1.f64 = double(float(f1.f64 + step));
+  }
+}
+
+}  // namespace
+
+void Wwe120LocatorFrom(PPCRegister& f1, PPCRegister& r28) { ShiftLocatorTime(f1, r28); }
+
+void Wwe120LocatorTo(PPCRegister& f1, PPCRegister& r28) { ShiftLocatorTime(f1, r28); }
+
+// Bone anchor events (bit 64, ticket 08): the notify walker fires a statement keyed to frame F
+// once time·60 + rate·0.5 >= F. A statement keyed to F covers the 60 Hz frame (F − 1, F]; at
+// 1/60 s it fires on the tick that plays that frame, but at 1/120 s on the second of its two
+// ticks. A bone anchor (pawn +0x230/+0x24C) holds a bone still while the pose changes, so one
+// set a tick late missed half of that change: a running overhead throw launched the victim ~59
+// units low. A halved tick lets only the anchor statements look ahead rate·1.0, so they fire
+// on the frame's first tick; every other event keeps its timing (firing them all early changes
+// which grabs and throws happen). The walker is in order, so an anchor never overtakes an
+// earlier event.
+constexpr uint32_t kBoneAnchorVtable = 0x82080388;   // Execute 0x82597240
+constexpr uint32_t kBoneAnchorVtable2 = 0x820801D0;  // Execute 0x82597168, same fields
+void Wwe120AnchorLookAhead(PPCRegister& f0, PPCRegister& f27, PPCRegister& f31,
+                           PPCRegister& r30) {
+  if (!Fix120On(64)) {
+    return;
+  }
+  const uint32_t vtable = LoadU32(REX_KERNEL_MEMORY()->virtual_membase(), r30.u32);
+  if (vtable != kBoneAnchorVtable && vtable != kBoneAnchorVtable2) {
+    return;
+  }
+  CountFix120(64);
+  f0.f64 = double(float(f31.f64 + float(f27.f64 * 2.0)));
+}
+
+// Match camera averaging (bit 1): 0x82B60A18(dt, ...) pushes one sample of the wrestlers'
+// centre per call into a 30-entry ring and returns the mean, 0.5 s of play at 1/60 s but
+// 0.25 s at 1/120 s, so the camera follows twice as tightly. The sample is the centre of the
+// bounding box of the points at [cam+0x3D4] (count +0x3D8, 12 bytes each). Skipping the push
+// on every other tick (dt == 0.0, its mean-only branch) kept the 0.5 s span but froze the
+// focus on that tick: a 60 Hz judder at 120 fps (ticket 06). At 1/120 s the output is instead
+// the mean of the last 60 samples, 0.5 s, updated every tick. A call with r6 set refills the
+// game's ring from one point (a camera cut); that refills this ring too.
+namespace {
+constexpr int kFocusSamples = 60;
+struct FocusRing {
+  uint32_t camera = 0;
+  uint64_t last_tick = 0;
+  int next = 0;
+  float samples[kFocusSamples][3] = {};
+};
+// Only touched while Fix120(1) holds, which reads the game thread's thread_local tick state, so
+// only the game thread uses it.
+FocusRing g_focus;
+
+void StoreF32(uint8_t* base, uint32_t address, float value) {
+  StoreU32(base, address, std::bit_cast<uint32_t>(value));
+}
+
+bool FocusSample(const uint8_t* base, uint32_t camera, float sample[3]) {
+  const uint32_t points = LoadU32(base, camera + 0x3D4);
+  const int32_t count = int32_t(LoadU32(base, camera + 0x3D8));
+  if (count <= 0 || points < 0x40000000) {  // heap objects live at 0x40000000 and up
+    return false;
+  }
+  float lo[3], hi[3];
+  for (int32_t i = 0; i < count; ++i) {
+    for (int k = 0; k < 3; ++k) {
+      const float v = LoadF32(base, points + 12 * i + 4 * k);
+      lo[k] = i == 0 ? v : std::min(lo[k], v);
+      hi[k] = i == 0 ? v : std::max(hi[k], v);
+    }
+  }
+  for (int k = 0; k < 3; ++k) {
+    sample[k] = (lo[k] + hi[k]) * 0.5f;
+  }
+  return true;
+}
+}  // namespace
+
+DECLARE_REX_FUNC(sub_82B60A18);
+REX_HOOK_RAW(sub_82B60A18) {
+  const uint32_t camera = ctx.r3.u32, out = ctx.r4.u32;
+  const bool refill = (ctx.r6.u32 & 0xFF) != 0;
+  float sample[3];
+  const bool own = out != 0 && Fix120(1) && FocusSample(base, camera, sample);
+  // The game's early outs leave out untouched; a NaN marker tells them apart.
+  const uint32_t kMarker = 0x7FC0DEAD;  // a NaN: never a focus coordinate the game writes
+  if (own) {
+    StoreU32(base, out, kMarker);
+  }
+  __imp__sub_82B60A18(ctx, base);
+  if (own && LoadU32(base, out) != kMarker) {
+    FocusRing& ring = g_focus;
+    const bool same_tick = ring.camera == camera && ring.last_tick == t_tick_count;
+    if (refill || ring.camera != camera || ring.last_tick + 1 < t_tick_count) {
+      float fill[3];
+      for (int k = 0; k < 3; ++k) {
+        fill[k] = refill ? LoadF32(base, out + 4 * k) : sample[k];
+      }
+      for (auto& s : ring.samples) {
+        std::copy(fill, fill + 3, s);
+      }
+      ring.camera = camera;
+      ring.next = 0;
+    }
+    if (!refill && !same_tick) {
+      std::copy(sample, sample + 3, ring.samples[ring.next]);
+      ring.next = (ring.next + 1) % kFocusSamples;
+    }
+    ring.last_tick = t_tick_count;
+    for (int k = 0; k < 3; ++k) {
+      double sum = 0.0;
+      for (const auto& s : ring.samples) {
+        sum += s[k];
+      }
+      StoreF32(base, out + 4 * k, float(sum / kFocusSamples));
+    }
+  }
+}
+
+namespace wwe::game_tick {
+
+void Configure(rex::Runtime* runtime) { g_runtime = runtime; }
+
+}  // namespace wwe::game_tick

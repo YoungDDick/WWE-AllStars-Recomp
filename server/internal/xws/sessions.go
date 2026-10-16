@@ -15,6 +15,11 @@ const (
 	contextGameMode = 0x800B // X_CONTEXT_GAME_MODE
 )
 
+// SessionIdleLimit is how long a session lives without a call about it. A host that crashes
+// or quits a failed match never deletes its session (issue #2); a healthy one lived at most
+// 21 minutes on the VPS, with a call at each step.
+const SessionIdleLimit = 30 * time.Minute
+
 // Context is an Xbox LIVE context (a user's game type, game mode, ...).
 type Context struct {
 	ID    uint32 `json:"id"`
@@ -63,6 +68,7 @@ type session struct {
 	Session
 	title      string
 	created    time.Time
+	active     time.Time       // the last call about the session
 	members    map[string]bool // XUID -> private slot
 	searchers  map[string]bool // XUIDs a search gave this session to
 	contexts   []Context
@@ -111,9 +117,42 @@ func sessionKey(title, id string) string {
 	return strings.ToUpper(title) + "/" + strings.ToLower(id)
 }
 
+// lookup finds a live session; s.mu is held.
 func (s *Server) lookup(r *http.Request) (*session, bool) {
+	s.expireIdle()
 	sess, ok := s.sessions[sessionKey(r.PathValue("title"), r.PathValue("id"))]
 	return sess, ok
+}
+
+// touch finds a live session and marks it active: a call from its host or a member, not a
+// searcher's look at it; s.mu is held.
+func (s *Server) touch(r *http.Request) (*session, bool) {
+	sess, ok := s.lookup(r)
+	if ok {
+		sess.active = s.settings.Now()
+	}
+	return sess, ok
+}
+
+// expireIdle drops the sessions nobody called about for SessionIdleLimit; s.mu is held.
+func (s *Server) expireIdle() {
+	now := s.settings.Now()
+	for key, sess := range s.sessions {
+		if idle := now.Sub(sess.active); idle >= SessionIdleLimit {
+			delete(s.sessions, key)
+			s.settings.Logf("session %s expired (idle %v)", sess.SessionID, idle.Round(time.Second))
+		}
+	}
+}
+
+// dropHostedBy drops the sessions a host left behind when it signs in again; s.mu is held.
+func (s *Server) dropHostedBy(xuid string) {
+	for key, sess := range s.sessions {
+		if strings.EqualFold(sess.XUID, xuid) {
+			delete(s.sessions, key)
+			s.settings.Logf("session %s dropped: its host %s signed in again", sess.SessionID, xuid)
+		}
+	}
 }
 
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
@@ -125,9 +164,10 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	created.SessionID = strings.ToLower(created.SessionID)
 	created.XUID = strings.ToUpper(created.XUID)
 	title := r.PathValue("title")
+	now := s.settings.Now()
 	s.mu.Lock()
 	s.sessions[sessionKey(title, created.SessionID)] = &session{Session: created, title: title,
-		created: time.Now(), members: map[string]bool{}, searchers: map[string]bool{}}
+		created: now, active: now, members: map[string]bool{}, searchers: map[string]bool{}}
 	s.mu.Unlock()
 	s.settings.Logf("session %s created by %s at %s (flags %#x, %d public, %d private, build %.12s)",
 		created.SessionID, created.XUID, created.HostAddress, created.Flags,
@@ -146,7 +186,7 @@ func (s *Server) setProperties(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess, ok := s.lookup(r)
+	sess, ok := s.touch(r)
 	if !ok {
 		http.Error(w, "no such session", http.StatusNotFound)
 		return
@@ -181,7 +221,7 @@ func (s *Server) modifySession(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess, ok := s.lookup(r)
+	sess, ok := s.touch(r)
 	if !ok {
 		http.Error(w, "no such session", http.StatusNotFound)
 		return
@@ -197,6 +237,7 @@ func (s *Server) modifySession(w http.ResponseWriter, r *http.Request) {
 func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.expireIdle()
 	key := sessionKey(r.PathValue("title"), r.PathValue("id"))
 	if _, ok := s.sessions[key]; !ok {
 		http.Error(w, "no such session", http.StatusNotFound)
@@ -233,6 +274,7 @@ func (s *Server) searchSessions(w http.ResponseWriter, r *http.Request) {
 	numUsers := max(1, query.NumUsers)
 
 	s.mu.Lock()
+	s.expireIdle()
 	var found []*session
 	for _, sess := range s.sessions {
 		if strings.ToUpper(sess.title) != title || sess.BuildID != query.BuildID ||
@@ -277,7 +319,7 @@ func (s *Server) joinSession(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess, ok := s.lookup(r)
+	sess, ok := s.touch(r)
 	if !ok {
 		http.Error(w, "no such session", http.StatusNotFound)
 		return
@@ -300,7 +342,7 @@ func (s *Server) leaveSession(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess, ok := s.lookup(r)
+	sess, ok := s.touch(r)
 	if !ok {
 		http.Error(w, "no such session", http.StatusNotFound)
 		return
@@ -321,7 +363,7 @@ func (s *Server) setQoS(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess, ok := s.lookup(r)
+	sess, ok := s.touch(r)
 	if !ok {
 		http.Error(w, "no such session", http.StatusNotFound)
 		return

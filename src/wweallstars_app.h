@@ -19,6 +19,7 @@
 #include "d3d_census.h"
 #include "frame_capture.h"
 #include "frame_clock.h"
+#include "game_tick_log.h"
 #include "image_check.h"
 #include "native/native_renderer.h"
 #include "resolve_watch.h"
@@ -142,6 +143,7 @@ class WweAllStarsApp : public rex::ReXApp {
     wwe::settings::LogGpu(runtime());
     wwe::settings::ApplySuggestedPresetOnFirstStart(wwe::settings::RuntimeSuggestedPreset(runtime()));
     wwe::frame_clock::Configure();
+    wwe::game_tick::Configure(runtime());
     wwe::frame_capture::Configure();
     wwe::native::Configure(runtime());
     ConfigureLiveVsync();

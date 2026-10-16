@@ -104,17 +104,19 @@ index 0000000..c1c181f
 +}  // namespace rex::kernel::xam::live
 diff --git a/include/rex/kernel/xam/live/identity.h b/include/rex/kernel/xam/live/identity.h
 new file mode 100644
-index 0000000..1fa183e
+index 0000000..23df192
 --- /dev/null
 +++ b/include/rex/kernel/xam/live/identity.h
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,53 @@
 +/**
 + * @file        identity.h
 + * @brief       The install's online identity: a random online XUID and MAC address.
 + *
 + * WWE All Stars recomp, online play (.scratch/online-play/). Every copy of the game used
 + * to be XUID 0xB13EBABEBABEBABE with MAC CC:CC:CC:CC:CC:CC, so two copies were one player.
-+ * The first online start writes online-identity.json to the user data folder.
++ * The first online start writes online-identity.json to the user data folder, with this
++ * machine's key: a copy of the folder on another machine gets its own identity there
++ * (issue #2: two friends on one XUID never saw each other's sessions).
 + */
 +
 +#pragma once
@@ -132,6 +134,7 @@ index 0000000..1fa183e
 +struct OnlineIdentity {
 +  uint64_t xuid = 0;
 +  std::array<uint8_t, 6> mac = {};
++  std::string machine;  // MachineKey() of the machine it was made on
 +};
 +
 +inline constexpr const char* kIdentityFileName = "online-identity.json";
@@ -143,9 +146,15 @@ index 0000000..1fa183e
 +std::string SerializeIdentity(const OnlineIdentity& identity);
 +std::optional<OnlineIdentity> ParseIdentity(std::string_view json);
 +
-+// The identity in `folder`, written there first when it is missing or unreadable.
++// The identity in `folder`, written there first when it is missing, unreadable or made on
++// another machine than `machine` (a file without a machine counts as another's). An empty
++// `machine` takes any readable file.
 +OnlineIdentity LoadOrCreateIdentity(const std::filesystem::path& folder,
-+                                    std::mt19937_64& random);
++                                    std::mt19937_64& random, std::string_view machine);
++
++// This machine's key: a hash of its installation ID (Windows MachineGuid, /etc/machine-id),
++// so the file never holds the ID itself. Empty when there is none.
++std::string MachineKey();
 +
 +// "02aabbcc0a01", as XWS stores MAC addresses.
 +std::string MacText(const std::array<uint8_t, 6>& mac);
@@ -1239,10 +1248,10 @@ index 0000000..729fa98
 +}  // namespace rex::kernel::xam::live
 diff --git a/src/kernel/xam/live/identity.cpp b/src/kernel/xam/live/identity.cpp
 new file mode 100644
-index 0000000..9da3ba6
+index 0000000..3807544
 --- /dev/null
 +++ b/src/kernel/xam/live/identity.cpp
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,150 @@
 +/**
 + * @file        identity.cpp
 + * @brief       The install's online identity (see identity.h).
@@ -1255,6 +1264,12 @@ index 0000000..9da3ba6
 +
 +#include <fmt/format.h>
 +#include <rapidjson/document.h>
++
++#include <rex/platform.h>
++
++#if REX_PLATFORM_WIN32
++#include <windows.h>
++#endif
 +
 +namespace rex::kernel::xam::live {
 +
@@ -1309,8 +1324,8 @@ index 0000000..9da3ba6
 +}
 +
 +std::string SerializeIdentity(const OnlineIdentity& identity) {
-+  return fmt::format("{{\n  \"xuid\": \"{:016X}\",\n  \"mac\": \"{}\"\n}}\n", identity.xuid,
-+                     MacText(identity.mac));
++  return fmt::format("{{\n  \"xuid\": \"{:016X}\",\n  \"mac\": \"{}\",\n  \"machine\": \"{}\"\n}}\n",
++                     identity.xuid, MacText(identity.mac), identity.machine);
 +}
 +
 +std::optional<OnlineIdentity> ParseIdentity(std::string_view json) {
@@ -1331,23 +1346,55 @@ index 0000000..9da3ba6
 +    return std::nullopt;
 +  }
 +  identity.mac = *mac;
++  if (doc.HasMember("machine") && doc["machine"].IsString()) {
++    identity.machine = doc["machine"].GetString();
++  }
 +  return identity;
 +}
 +
++std::string MachineKey() {
++  std::string id;
++#if REX_PLATFORM_WIN32
++  char guid[64] = {};
++  DWORD size = sizeof(guid);
++  if (RegGetValueA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Cryptography", "MachineGuid",
++                   RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, nullptr, guid, &size) == ERROR_SUCCESS) {
++    id = guid;
++  }
++#else
++  for (const char* path : {"/etc/machine-id", "/var/lib/dbus/machine-id"}) {
++    std::ifstream in(path);
++    if (in >> id && !id.empty()) {
++      break;
++    }
++  }
++#endif
++  if (id.empty()) {
++    return {};
++  }
++  uint64_t hash = 0xCBF29CE484222325ull;  // FNV-1a
++  for (const char c : id) {
++    hash = (hash ^ uint8_t(c)) * 0x100000001B3ull;
++  }
++  return fmt::format("{:016x}", hash);
++}
++
 +OnlineIdentity LoadOrCreateIdentity(const std::filesystem::path& folder,
-+                                    std::mt19937_64& random) {
++                                    std::mt19937_64& random, std::string_view machine) {
 +  const auto file = folder / kIdentityFileName;
 +  {
 +    std::ifstream in(file, std::ios::binary);
 +    if (in) {
 +      std::stringstream text;
 +      text << in.rdbuf();
-+      if (auto identity = ParseIdentity(text.str())) {
++      auto identity = ParseIdentity(text.str());
++      if (identity && (machine.empty() || identity->machine == machine)) {
 +        return *identity;
 +      }
 +    }
 +  }
-+  const OnlineIdentity identity = NewIdentity(random);
++  OnlineIdentity identity = NewIdentity(random);
++  identity.machine = std::string(machine);
 +  std::error_code ignored;
 +  std::filesystem::create_directories(folder, ignored);
 +  std::ofstream(file, std::ios::binary | std::ios::trunc) << SerializeIdentity(identity);
@@ -1357,7 +1404,7 @@ index 0000000..9da3ba6
 +}  // namespace rex::kernel::xam::live
 diff --git a/src/kernel/xam/live/live.cpp b/src/kernel/xam/live/live.cpp
 new file mode 100644
-index 0000000..414d786
+index 0000000..2bfc12c
 --- /dev/null
 +++ b/src/kernel/xam/live/live.cpp
 @@ -0,0 +1,304 @@
@@ -1441,7 +1488,7 @@ index 0000000..414d786
 +  std::mt19937_64 random((uint64_t(device()) << 32) ^ device() ^
 +                         uint64_t(std::chrono::steady_clock::now().time_since_epoch().count()));
 +  const auto folder = REX_KERNEL_STATE()->emulator()->user_data_root();
-+  s.identity = LoadOrCreateIdentity(folder, random);
++  s.identity = LoadOrCreateIdentity(folder, random, MachineKey());
 +  s.identity_loaded = true;
 +  REXKRNL_INFO("[online] identity XUID {:016X}, MAC {} ({})", s.identity.xuid,
 +               MacText(s.identity.mac), (folder / kIdentityFileName).string());

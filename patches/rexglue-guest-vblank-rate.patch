@@ -1,0 +1,244 @@
+diff --git a/include/rex/graphics/graphics_system.h b/include/rex/graphics/graphics_system.h
+index c598083..d25cf8c 100644
+--- a/include/rex/graphics/graphics_system.h
++++ b/include/rex/graphics/graphics_system.h
+@@ -76,6 +76,7 @@ class GraphicsSystem : public system::IGraphicsSystem {
+   void EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_size_log2) override;
+ 
+   void SetInterruptCallback(uint32_t callback, uint32_t user_data) override;
++  void SetGuestVblankRate(double hz) override;
+   void DispatchInterruptCallback(uint32_t source, uint32_t cpu);
+ 
+   virtual void ClearCaches();
+@@ -122,6 +123,17 @@ class GraphicsSystem : public system::IGraphicsSystem {
+   std::atomic<bool> vsync_worker_running_;
+   system::object_ref<system::XHostThread> vsync_worker_thread_;
+ 
++  // SetGuestVblankRate's rate, 0 for the video mode's; read by the GPU VSync thread each vblank.
++  std::atomic<double> guest_vblank_rate_override_{0.0};
++  // Bumped by each SetGuestVblankRate, so the display thread can tell that the rate it locked
++  // to is already stale.
++  std::atomic<uint64_t> guest_vblank_rate_generation_{0};
++  // The video mode's refresh rate, read once before the GPU VSync thread starts (the mode is
++  // fixed for the session): querying it takes the cvar registry's lock.
++  std::atomic<double> video_mode_vblank_hz_{60.0};
++  // The guest vblank's current rate: the override, else the video mode's.
++  double GuestVblankHz() const;
++
+   // The guest vblank's ideal time (steady_clock ticks) and count, for comparing it with the
+   // host display's real vblank.
+   std::atomic<int64_t> guest_vblank_time_{0};
+diff --git a/include/rex/graphics/vblank_source.h b/include/rex/graphics/vblank_source.h
+index 5fb6097..9937797 100644
+--- a/include/rex/graphics/vblank_source.h
++++ b/include/rex/graphics/vblank_source.h
+@@ -2,13 +2,14 @@
+  * @file        graphics/vblank_source.h
+  * @brief       Whether the guest vblank follows the host display's vblank
+  *
+- * The guest vblank normally runs on the host clock at 60 Hz. On a display whose
+- * real refresh is a little off 60 Hz or a multiple of it (59.94, 119.88), the two
+- * drift, and every few seconds a frame is held or dropped. Driving the guest
+- * vblank from every Nth display refresh removes that; the game then runs at the
+- * display's rate (0.1% slow at 59.94 Hz). With variable refresh the display
+- * already follows the frames, and other rates cannot show 60 Hz evenly, so those
+- * keep the host clock.
++ * The guest vblank normally runs on the host clock at the guest's rate (60 Hz; WWE:
++ * 120 Hz in 120 fps matches). On a display whose real refresh is a little off
++ * that rate or a multiple of it (59.94, 119.88), the two drift, and every few
++ * seconds a frame is held or dropped. Driving the guest vblank from every Nth
++ * display refresh removes that; the game then runs at the display's rate (0.1%
++ * slow at 59.94 Hz). With variable refresh the display already follows the
++ * frames, and other rates cannot show the guest's rate evenly, so those keep the
++ * host clock.
+  *
+  * @license     BSD 3-Clause License
+  *              See LICENSE file in the project root for full license text.
+diff --git a/include/rex/system/interfaces/graphics.h b/include/rex/system/interfaces/graphics.h
+index d54df86..5f8c213 100644
+--- a/include/rex/system/interfaces/graphics.h
++++ b/include/rex/system/interfaces/graphics.h
+@@ -57,6 +57,10 @@ class IGraphicsSystem {
+   virtual ui::GraphicsProvider* provider() const { return nullptr; }
+   virtual ui::Presenter* presenter() const { return nullptr; }
+ 
++  // The guest vblank's rate while the game wants one other than its video mode's (WWE: 120 fps
++  // matches); 0 returns to the video mode's rate. Applies from the next vblank. Default: none.
++  virtual void SetGuestVblankRate(double hz) { (void)hz; }
++
+   // Guest GPU services reached from the xboxkrnl Vd* exports.
+   virtual void SetInterruptCallback(uint32_t callback, uint32_t user_data) {
+     (void)callback;
+diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
+index 50b2935..89a3b42 100644
+--- a/include/rex/ui/presenter.h
++++ b/include/rex/ui/presenter.h
+@@ -367,6 +367,10 @@ class Presenter {
+   // fixed-refresh display (ADR-0016), else 0.
+   void OnGuestVblank(std::chrono::steady_clock::time_point vblank_time,
+                      uint32_t display_refreshes_per_vblank = 0);
++  // The guest vblank's rate changes (GraphicsSystem::SetGuestVblankRate): take the new period
++  // at once, instead of rejecting it as a gap until it has disagreed for a while, and skip the
++  // one interval that straddles the switch.
++  void OnGuestVblankRateChange(std::chrono::steady_clock::duration period);
+   // Stops the pacing thread; call after guest vblanks and refreshes have stopped.
+   void StopGuestOutputPacing();
+   // The implementation must be callable from any thread, including from
+@@ -1085,6 +1089,7 @@ class Presenter {
+   std::chrono::steady_clock::duration guest_output_pacing_vblank_period_{};
+   // Consecutive vblank gaps the period filter rejected; a run of them is a real rate change.
+   uint32_t guest_output_pacing_period_rejects_ = 0;
++  bool guest_output_pacing_skip_period_ = false;
+   bool guest_output_pacing_shutdown_ = false;
+   std::atomic<bool> guest_output_paced_frame_pending_{false};
+   // steady_clock ticks when the pending frame was submitted, for the pacing log.
+diff --git a/src/graphics/graphics_system.cpp b/src/graphics/graphics_system.cpp
+index 3874fa4..8179926 100644
+--- a/src/graphics/graphics_system.cpp
++++ b/src/graphics/graphics_system.cpp
+@@ -40,8 +40,8 @@
+ 
+ REXCVAR_DEFINE_BOOL(vblank_follows_display, true, "GPU",
+                     "Drive the guest vblank from the display's own refresh when it is (nearly) a "
+-                    "multiple of 60 Hz and not variable, so no frame is held or dropped as the "
+-                    "two drift; off keeps the fixed 60 Hz host clock (scene runs)")
++                    "multiple of the guest vblank's rate and not variable, so no frame is held or "
++                    "dropped as the two drift; off keeps the fixed host clock (scene runs)")
+     // The display vblank thread always runs and reads it once a second (WWE: live
+     // Lock to display).
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+@@ -164,12 +164,16 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
+                                  reinterpret_cast<runtime::MMIOWriteCallback>(WriteRegisterThunk));
+ 
+   // Guest vblank timer based on the configured guest video mode.
++  {
++    system::X_VIDEO_MODE video_mode;
++    kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
++    video_mode_vblank_hz_.store(std::max(1.0, double(float(video_mode.refresh_rate))),
++                                std::memory_order_release);
++  }
+   vsync_worker_running_ = true;
+   vsync_worker_thread_ = system::object_ref<system::XHostThread>(
+       new system::XHostThread(kernel_state_, 128 * 1024, 0, [this]() {
+-        system::X_VIDEO_MODE video_mode;
+-        kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
+-        double refresh_rate_hz = std::max(1.0, double(float(video_mode.refresh_rate)));
++        double refresh_rate_hz = GuestVblankHz();
+         uint64_t guest_tick_frequency = chrono::Clock::guest_tick_frequency();
+         uint64_t vsync_interval_ticks =
+             std::max(uint64_t(1), uint64_t(double(guest_tick_frequency) / refresh_rate_hz));
+@@ -186,6 +190,13 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
+           }
+         };
+         while (vsync_worker_running_) {
++          // A rate change (SetGuestVblankRate) applies from the next vblank.
++          const double want_hz = GuestVblankHz();
++          if (want_hz != refresh_rate_hz) {
++            refresh_rate_hz = want_hz;
++            vsync_interval_ticks =
++                std::max(uint64_t(1), uint64_t(double(guest_tick_frequency) / refresh_rate_hz));
++          }
+           if (display_lock_every_.load(std::memory_order_acquire) && REXCVAR_GET(vsync)) {
+             // The display drives the guest vblank. Wait for its signal; if it stops (the
+             // display thread lost its event or unlocked), fall through to the host clock.
+@@ -244,6 +255,35 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
+   return X_STATUS_SUCCESS;
+ }
+ 
++double GraphicsSystem::GuestVblankHz() const {
++  const double override_hz = guest_vblank_rate_override_.load(std::memory_order_acquire);
++  if (override_hz > 0.0) {
++    return override_hz;
++  }
++  return video_mode_vblank_hz_.load(std::memory_order_acquire);
++}
++
++void GraphicsSystem::SetGuestVblankRate(double hz) {
++  hz = std::max(0.0, hz);
++  if (guest_vblank_rate_override_.exchange(hz, std::memory_order_acq_rel) == hz) {
++    return;
++  }
++  guest_vblank_rate_generation_.fetch_add(1, std::memory_order_acq_rel);
++  // A display lock counts refreshes per guest vblank at the old rate: drop it, so the GPU VSync
++  // thread runs on the host clock until the display thread locks again at the new rate.
++  display_lock_every_.store(0, std::memory_order_release);
++  display_tick_cv_.notify_all();
++  if (presenter_) {
++    presenter_->OnGuestVblankRateChange(std::chrono::duration_cast<std::chrono::steady_clock::duration>(
++        std::chrono::duration<double>(1.0 / GuestVblankHz())));
++  }
++  if (hz > 0.0) {
++    REXGPU_INFO("Guest vblank rate: {:.0f} Hz", hz);
++  } else {
++    REXGPU_INFO("Guest vblank rate: the video mode's");
++  }
++}
++
+ void GraphicsSystem::Shutdown() {
+   if (command_processor_) {
+     command_processor_->Shutdown();
+@@ -400,20 +440,30 @@ void GraphicsSystem::DisplayVblankThread() {
+     }
+     // Read each second: the setting can change during the session.
+     const bool follow = REXCVAR_GET(vblank_follows_display);
++    // The guest vblank's own rate, so a 120 Hz guest locks to every 3rd refresh of a 360 Hz
++    // display, not every 6th.
++    const uint64_t rate_generation =
++        guest_vblank_rate_generation_.load(std::memory_order_acquire);
+     const VblankDecision decision =
+-        ChooseVblankSource(measured_hz, variable_refresh_seen, follow);
++        ChooseVblankSource(measured_hz, variable_refresh_seen, follow, GuestVblankHz());
+     if (decision.source == VblankSource::kDisplay) {
+       if (++windows_allowing >= kWindowsToLock &&
+           display_lock_every_.load(std::memory_order_acquire) != decision.display_per_guest) {
+         display_lock_every_.store(decision.display_per_guest, std::memory_order_release);
+-        REXGPU_INFO("Guest vblank now follows the display: every {} refreshes of {:.3f} Hz",
+-                    decision.display_per_guest, 1000.0 / display_period_ms);
++        if (guest_vblank_rate_generation_.load(std::memory_order_acquire) != rate_generation) {
++          // The rate changed after it was read: the ratio belongs to the old one.
++          display_lock_every_.store(0, std::memory_order_release);
++          windows_allowing = 0;
++        } else {
++          REXGPU_INFO("Guest vblank now follows the display: every {} refreshes of {:.3f} Hz",
++                      decision.display_per_guest, 1000.0 / display_period_ms);
++        }
+       }
+     } else {
+       windows_allowing = 0;
+       stop_following(!follow                ? "Lock to display is off"
+                      : variable_refresh_seen ? "variable refresh is active"
+-                                             : "the display's refresh is not a multiple of 60 Hz");
++                                             : "the display's refresh is not a multiple of the guest's");
+     }
+     if (log) {
+       REXGPU_INFO(
+diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
+index 601c51b..0e341cb 100644
+--- a/src/ui/presenter.cpp
++++ b/src/ui/presenter.cpp
+@@ -684,6 +684,13 @@ bool Presenter::RefreshGuestOutput(
+   return is_active;
+ }
+ 
++void Presenter::OnGuestVblankRateChange(std::chrono::steady_clock::duration period) {
++  std::lock_guard<std::mutex> lock(guest_output_pacing_mutex_);
++  guest_output_pacing_vblank_period_ = period;
++  guest_output_pacing_period_rejects_ = 0;
++  guest_output_pacing_skip_period_ = true;
++}
++
+ void Presenter::OnGuestVblank(std::chrono::steady_clock::time_point vblank_time,
+                               uint32_t display_refreshes_per_vblank) {
+   {
+@@ -692,7 +699,10 @@ void Presenter::OnGuestVblank(std::chrono::steady_clock::time_point vblank_time,
+       return;
+     }
+     guest_output_pacing_display_every_ = display_refreshes_per_vblank;
+-    if (guest_output_pacing_vblank_count_++) {
++    if (guest_output_pacing_skip_period_) {
++      guest_output_pacing_skip_period_ = false;
++      ++guest_output_pacing_vblank_count_;
++    } else if (guest_output_pacing_vblank_count_++) {
+       auto period = vblank_time - guest_output_pacing_vblank_time_;
+       auto& current = guest_output_pacing_vblank_period_;
+       // Ignore single gaps from missed ticks; a real rate change moves by less than half a

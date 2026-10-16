@@ -19,6 +19,12 @@
 REXCVAR_DEFINE_STRING(wwe_input_script, "", "WWEAllStars",
                       "Drive the game from pad commands appended to this file "
                       "(src/script_input.h); it becomes the only controller");
+REXCVAR_DEFINE_BOOL(wwe_keyboard_player2, false, "WWEAllStars",
+                    "With mnk_mode: the keyboard is player 2's controller instead of joining "
+                    "player 1's, so one person with one pad can have a human player 2");
+REXCVAR_DEFINE_STRING(wwe_input_script_p2, "", "WWEAllStars",
+                      "With wwe_input_script: a second scripted pad (player 2) driven from this "
+                      "file, so a scripted run can have a human player 2 who stands still");
 
 namespace wwe {
 
@@ -98,9 +104,48 @@ void ScriptInputDriver::ReadDuration(std::istream& in, Step& step) {
   }
 }
 
+namespace {
+
+// SlotAssignment, except the keyboard (MnK, a synthetic device) is player 2.
+class KeyboardPlayer2Assignment final : public DeviceAssignment {
+ public:
+  void OnDevicesChanged(const std::vector<DeviceInfo>& devices) override {
+    for (auto& user : users_) {
+      user.clear();
+    }
+    for (const auto& device : devices) {
+      if (device.synthetic && device.name == "Keyboard and Mouse") {
+        users_[1].push_back(device.id);
+      } else if (device.synthetic) {
+        users_[0].push_back(device.id);
+      } else if (device.ordinal < kMaxGuestUsers) {
+        users_[device.ordinal].push_back(device.id);
+      }
+    }
+  }
+  void DevicesForUser(uint32_t user_index, std::vector<DeviceId>& out) const override {
+    out.clear();
+    if (user_index < kMaxGuestUsers) {
+      out = users_[user_index];
+    }
+  }
+
+ private:
+  std::vector<std::vector<DeviceId>> users_ = std::vector<std::vector<DeviceId>>(kMaxGuestUsers);
+};
+
+}  // namespace
+
 void InstallScriptInput(rex::RuntimeConfig& config, std::function<uint64_t()> frames) {
   const std::filesystem::path file = REXCVAR_GET(wwe_input_script);
   if (file.empty()) {
+    if (REXCVAR_GET(wwe_keyboard_player2)) {
+      config.input_factory = [](bool tool_mode) -> std::unique_ptr<rex::system::IInputSystem> {
+        auto input = CreateDefaultInputSystem(tool_mode);
+        input->SetDeviceAssignment(std::make_unique<KeyboardPlayer2Assignment>());
+        return input;
+      };
+    }
     return;
   }
   // XInput, SDL and MnK stay out, so a real pad or keyboard cannot disturb a
@@ -111,15 +156,22 @@ void InstallScriptInput(rex::RuntimeConfig& config, std::function<uint64_t()> fr
                                                       frames);
     driver->Setup();
     input->AddDriver(std::move(driver));
+    if (const std::filesystem::path file2 = REXCVAR_GET(wwe_input_script_p2); !file2.empty()) {
+      auto driver2 = std::make_unique<ScriptInputDriver>(file2, ScriptInputDriver::SteadyClock,
+                                                         frames, ScriptInputDriver::kDevice2);
+      driver2->Setup();
+      input->AddDriver(std::move(driver2));
+    }
     input->SetDeviceAssignment(std::make_unique<SlotAssignment>());
     return input;
   };
 }
 
 ScriptInputDriver::ScriptInputDriver(std::filesystem::path command_file, Clock clock,
-                                     FrameSource frames)
+                                     FrameSource frames, DeviceId id)
     : InputDriver(/*window=*/nullptr, /*window_z_order=*/0),
       file_(std::move(command_file)),
+      id_(id),
       clock_(std::move(clock)),
       frames_(std::move(frames)) {}
 
@@ -135,7 +187,7 @@ X_STATUS ScriptInputDriver::Setup() {
 
 void ScriptInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
   DeviceInfo info;
-  info.id = kDevice;
+  info.id = id_;
   info.name = "Script";
   out.push_back(info);
 }
@@ -282,7 +334,7 @@ bool ScriptInputDriver::Over(std::chrono::milliseconds now, uint64_t frame) cons
 }
 
 X_RESULT ScriptInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
-  if (id != kDevice) {
+  if (id != id_) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
   uint32_t packet = 0;
@@ -303,7 +355,7 @@ X_RESULT ScriptInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state
 
 X_RESULT ScriptInputDriver::GetDeviceCapabilities(DeviceId id, uint32_t,
                                                   X_INPUT_CAPABILITIES* out_caps) {
-  if (id != kDevice) {
+  if (id != id_) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
   if (out_caps) {
@@ -322,13 +374,13 @@ X_RESULT ScriptInputDriver::GetDeviceCapabilities(DeviceId id, uint32_t,
 }
 
 X_RESULT ScriptInputDriver::SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION*) {
-  return id == kDevice ? X_ERROR_SUCCESS : X_ERROR_DEVICE_NOT_CONNECTED;
+  return id == id_ ? X_ERROR_SUCCESS : X_ERROR_DEVICE_NOT_CONNECTED;
 }
 
 // Pad keystrokes do nothing in All Stars: its keystroke loop drops every
 // virtual key above 0xFF (docs/research/scripted-input.md §3).
 X_RESULT ScriptInputDriver::GetDeviceKeystroke(DeviceId id, uint32_t, X_INPUT_KEYSTROKE*) {
-  return id == kDevice ? X_ERROR_EMPTY : X_ERROR_DEVICE_NOT_CONNECTED;
+  return id == id_ ? X_ERROR_EMPTY : X_ERROR_DEVICE_NOT_CONNECTED;
 }
 
 }  // namespace wwe

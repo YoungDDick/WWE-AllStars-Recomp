@@ -13,7 +13,7 @@ public sealed class SettingsSchemaTests
         Assert.Equal(
             ["fullscreen", "vulkan_device", "user_language", "graphics_preset", "wwe_native_renderer",
              "wwe_native_supersample",
-             "wwe_native_resolution_scale", "wwe_native_anisotropy", "wwe_native_color_mode", "wwe_60fps_entrances", "wwe_unlock_everything",
+             "wwe_native_resolution_scale", "wwe_native_anisotropy", "wwe_native_color_mode", "wwe_60fps_entrances", "wwe_120fps_matches", "wwe_unlock_everything",
              "wwe_online",
              "wwe_online_name",
              "wwe_online_server", "wwe_online_upnp"],
@@ -46,7 +46,7 @@ public sealed class SettingsSchemaTests
 
         // Live in game (live-settings 01-04): Display mode, Texture filtering and 60 fps entrances; the rest of the
         // shown settings take a restart there, so their help stays as the game wrote it.
-        Assert.Equal(["fullscreen", "wwe_native_anisotropy", "wwe_60fps_entrances"],
+        Assert.Equal(["fullscreen", "wwe_native_anisotropy", "wwe_60fps_entrances", "wwe_120fps_matches"],
             schema.Startup.Where(s => SettingsFile.RowHelp(s, "").EndsWith(SettingsFile.InGameLiveNote))
                 .Select(s => s.Key));
         var texture = schema.Find("wwe_native_anisotropy")!;
